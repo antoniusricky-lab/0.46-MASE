@@ -366,3 +366,85 @@ python3 exp5.py          # calendar features + gap arithmetic (~60 s)
 
 Pure standard library — no pandas/numpy needed, since this sandbox has no
 network access to install them.
+
+---
+
+## The corrected notebook
+
+`corrected_pipeline.ipynb` (32 cells) implements fixes 1–6 and writes two
+submissions. `pipeline.py` is the same code as a flat script.
+
+```bash
+pip install numpy lightgbm      # pandas is not required
+jupyter lab corrected_pipeline.ipynb
+```
+
+Run it from the folder holding the competition CSVs, or set `DATA_DIR`.
+
+### What it writes
+
+| file | contents |
+|---|---|
+| `submission.csv` | all fixes, including the Idulfitri guard |
+| `submission_no_eid_guard.csv` | all fixes except the guard |
+
+Submit both. The difference isolates the one bet in the pipeline that cannot be
+validated offline (see below), and 4,417 rows differ between them.
+
+### Design choice: standard library only
+
+Every data-handling and feature-engineering step uses only the Python standard
+library. `numpy` and `lightgbm` are touched in two cells. This was deliberate:
+the sandbox this was developed in had no network access, so numpy/pandas could
+not be installed, and a pandas pipeline would have shipped **untested**.
+
+Instead the notebook carries a hierarchical-median fallback model, which let the
+entire pipeline — windows, features, CV, calibration, diagnostics, the guard and
+submission writing — be executed and verified end-to-end. The fallback scores
+**0.3931** raw / **0.3896** calibrated on the proxy population, exactly
+reproducing the independent measurement in §7, which confirms the notebook and
+the analysis scripts agree.
+
+So if LightGBM is missing the notebook still produces a valid submission, just a
+weaker one. With LightGBM it swaps in a boosted L1 model on the same features.
+
+**Untested surface:** the LightGBM calls themselves (`lgb.Dataset`, `lgb.train`,
+`predict`) and the numpy matrix fill. Roughly 15 lines, written conventionally
+with a fallback for the older `early_stopping_rounds` API. Everything else ran.
+
+### Honest limitation on fix 2
+
+`train.csv` starts 2025-04-01, which is already Eid+1, so **no training window
+can have its observation days before Eid and its target days after it.** The
+straddle the 2026-03-18 cohort needs is structurally absent — not fixable with
+more features or a bigger model. Cell 14 asserts this and prints `0`.
+
+`days_since_eid` still helps the model recognise an Eid day, but every training
+example of one has its `scale` measured inside the Eid window too, so the model
+never sees a pre-Eid denominator. The guard is therefore an explicit **prior**.
+
+Cell 14 quantifies the bet instead of hiding it, scoring nine guard strategies
+against seven truth scenarios. The structure it exposes:
+
+* `uplift`, built only from train, says those target days should run at
+  **1.95** (Eid Saturday) down to **0.64–0.93** (the following weekdays)
+* the model predicts **1.09 → 0.11**, so horizon decay is overwhelming the
+  calendar signal at D8–D10
+* a floor proportional to `uplift` lifts D8–D10 from 0.10→0.55 and barely
+  touches D4–D7
+
+`calendar 0.5` came out with **negative worst-case regret** — better than no
+guard under every scenario tested. The default is `calendar 0.6`, whose worst
+case is +0.0031 with up to −0.0295 upside. Set `EID_GUARD_MODE = "none"` to
+disable, or `"flat"` for a constant floor.
+
+### Reading the output
+
+Cell 11 prints MASE by calendar regime, activity pattern, horizon and D1
+day-of-week. Those breakdowns, not the overall number, are what the original
+notebook was missing — compare the regime rows against §1 and the pattern rows
+against §6.
+
+The proxy MASE is **not** a leaderboard estimate. The proxy population contains
+no Ramadan, because train contains none, so the leaderboard will read higher.
+§1 gives the reweighting arithmetic.
