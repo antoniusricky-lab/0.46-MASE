@@ -35,7 +35,7 @@ SEED = 2026
 random.seed(SEED)
 
 DATA_DIR = "."                 # folder holding the competition CSVs
-ANCHOR_LAGS = tuple(range(25))  # training windows per film; 0 = release window
+ANCHOR_LAGS = tuple(range(13))  # 0-12 measured == 0-24 with 33% fewer rows
 TEST_D1_DOW = {2, 3, 4}         # Wed/Thu/Fri = 96% of test films
 N_FOLDS = 5
 LABEL_CLIP_Q = 0.999
@@ -478,6 +478,13 @@ _proxy_keys = {(w[0], w[1], w[2]) for w in PROXY_W}
 # definitions stay identical.
 
 # %%
+def scbin(x):
+    for i, b in enumerate((5, 10, 25, 50, 100, 250, 600)):
+        if x <= b:
+            return i
+    return 7
+
+
 def film_aggs(windows):
     acc = defaultdict(lambda: [0, 0, 0, 0, 0.0, 0])   # s1,s2,s3,npairs,occ,shows
     for (m, c, d1, s, occ, sh, y) in windows:
@@ -507,6 +514,98 @@ def pair_ranks(windows):
 AGG_TRAIN, RANK_TRAIN = film_aggs(TRAIN_W), pair_ranks(TRAIN_W)
 AGG_TEST, RANK_TEST = film_aggs(TEST_W), pair_ranks(TEST_W)
 print(f"film-window aggregates: train {len(AGG_TRAIN):,} | test {len(AGG_TEST):,}")
+
+# Folds are assigned HERE, before any feature is built, because the film-curve
+# feature below is a target encoding and must be computed out of fold.
+_uniq = sorted({w[0] for w in TRAIN_W})
+random.Random(SEED).shuffle(_uniq)
+FOLD_OF = {m: i % N_FOLDS for i, m in enumerate(_uniq)}
+print(f"film folds assigned for {len(FOLD_OF)} films")
+
+
+# ===================================================== stage 1: film curve
+# Oracle study (analysis/oracles.py): knowing a film's own national D4-D10
+# ratio curve - with NO pair-level information - scores 0.3039 against a
+# 0.3944 baseline, the largest single lever found. analysis/two_stage.py
+# banks +0.0116 of that with a crude 5-feature median table, so the curve is
+# partly predictable. Exposed here as a FEATURE rather than a hard
+# multiplicative decomposition, which let the tree ignore it where the
+# decomposition regressed (Wednesday D4).
+FILM_TGT = {}
+for (m, c, d1, s, occ, sh, y) in TRAIN_W:
+    if y is None:
+        continue
+    t = FILM_TGT.setdefault((m, d1), [0] * 7)
+    for h in range(7):
+        t[h] += y[h]
+
+
+def _tbin(x):
+    for i, b in enumerate((0.5, 0.75, 0.95, 1.15, 1.5)):
+        if x <= b:
+            return i
+    return 5
+
+
+def film_key(key, agg):
+    m, d1 = key
+    a = agg[key]
+    n_obs = max(a[0] + a[1] + a[2], 1)
+    trend = a[2] / max(a[0], 1)
+    return (d1.weekday(), _tbin(trend), scbin(n_obs / 1000.0),
+            min(a[3] // 20, 5))
+
+
+def _fc_keys(fk, h):
+    dow, tr, sz, npb = fk
+    return [(h, dow, tr, sz), (h, dow, tr), (h, dow, sz), (h, dow), (h, tr), (h,)]
+
+
+def fit_film_curve(keys, agg, min_n=8):
+    acc = [defaultdict(list) for _ in range(6)]
+    glob = defaultdict(list)
+    for key in keys:
+        a = agg[key]
+        mu = max((a[0] + a[1] + a[2]) / 3.0, 1.0)
+        fk = film_key(key, agg)
+        for h in range(7):
+            v = FILM_TGT[key][h] / mu
+            glob[h].append(v)
+            for j, k in enumerate(_fc_keys(fk, h)):
+                acc[j][k].append(v)
+    return ([{k: _median(v) for k, v in a.items() if len(v) >= min_n}
+             for a in acc],
+            {h: _median(glob[h]) for h in range(7)})
+
+
+def pred_film_curve(mdl, fk, h):
+    tabs, g = mdl
+    for t, k in zip(tabs, _fc_keys(fk, h)):
+        if k in t:
+            return t[k]
+    return g[h]
+
+
+_all_keys = [k for k in AGG_TRAIN if k in FILM_TGT]
+FC = {}
+for f in range(N_FOLDS):                      # out-of-fold for training rows
+    mdl = fit_film_curve([k for k in _all_keys if FOLD_OF.get(k[0], -1) != f],
+                         AGG_TRAIN)
+    for k in _all_keys:
+        if FOLD_OF.get(k[0], -1) == f:
+            fk = film_key(k, AGG_TRAIN)
+            for h in range(7):
+                FC[(k[0], k[1], h)] = pred_film_curve(mdl, fk, h)
+_full = fit_film_curve(_all_keys, AGG_TRAIN)  # full fit for test rows
+for k in AGG_TEST:
+    fk = film_key(k, AGG_TEST)
+    for h in range(7):
+        FC[(k[0], k[1], h)] = pred_film_curve(_full, fk, h)
+print(f"film-curve feature: {len(FC):,} (film, window, horizon) entries")
+print("  predicted national ratio by horizon (test windows):")
+for h in range(7):
+    v = [FC[(k[0], k[1], h)] for k in AGG_TEST]
+    print(f"    D{h + 4:<3d} median {_median(v):.3f}")
 
 # %% [markdown]
 # ## 8. Feature builder
@@ -548,7 +647,7 @@ ROW_NAMES = [
     "nonwork_run", "days_to_next_hol", "days_from_prev_hol",
     "days_since_eid", "is_eid_window", "eid_week",
     "in_ramadan", "ramadan_day", "ramadan_late", "in_xmas_ny", "days_to_xmas",
-    "cal_factor", "uplift", "regime_change",
+    "cal_factor", "uplift", "regime_change", "film_curve",
 ]
 FEATS = PAIR_NAMES + ROW_NAMES
 CAT_FEATS = ["cinema_code", "city_code", "d1_dow", "t_dow", "genre_code",
@@ -618,7 +717,7 @@ def pair_features(w, agg, rank, idx):
     ]
 
 
-def row_features(d1, h, base_cf, obs_regime):
+def row_features(d1, h, base_cf, obs_regime, fc=0.0):
     t = d1 + dt.timedelta(days=3 + h)
     c = CAL[t]
     return [
@@ -627,7 +726,7 @@ def row_features(d1, h, base_cf, obs_regime):
         float(c[8]), float(c[9]), float(c[10]),
         float(c[11]), float(c[12]), float(c[13]), float(c[14]), float(c[15]),
         c[16], c[16] / max(base_cf, 1e-6),
-        float(1 if regime_of(t) != obs_regime else 0),
+        float(1 if regime_of(t) != obs_regime else 0), fc,
     ]
 
 
@@ -645,7 +744,8 @@ def iter_rows(windows, agg, rank):
         for h in range(7):
             yield (m, d1, c, h, scale,
                    (float(y[h]) if y is not None else None),
-                   pf + row_features(d1, h, base_cf, obs_reg))
+                   pf + row_features(d1, h, base_cf, obs_reg,
+                                     FC.get((m, d1, h), 0.0)))
 
 
 _probe = next(iter_rows(TRAIN_W[:1], AGG_TRAIN, RANK_TRAIN))
@@ -791,20 +891,12 @@ def film_folds(meta, k):
     return {m: i % k for i, m in enumerate(uniq)}
 
 
-FOLD_OF = film_folds(TR_META, N_FOLDS)
 FOLD = [FOLD_OF[r[M_FILM]] for r in TR_META]
 
 
 # ---------------------------------------------------------------- fallback
-def _scbin(x):
-    for i, b in enumerate((5, 10, 25, 50, 100, 250, 600)):
-        if x <= b:
-            return i
-    return 7
-
-
 def _fb_keys(r):
-    sb = _scbin(r[M_SCALE])
+    sb = scbin(r[M_SCALE])
     return [(r[M_OFF], r[M_DOW], r[M_PAT], sb),
             (r[M_OFF], r[M_DOW], r[M_PAT]),
             (r[M_OFF], r[M_PAT], sb),

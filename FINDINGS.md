@@ -568,3 +568,113 @@ far-horizon zeros right — the thing that broke here.
 
 The quantile snap is now a crude stand-in for it. If more is needed, port
 these fixes into that notebook and keep its blend rather than replacing it.
+
+---
+
+## Oracle study: ranking the remaining levers
+
+Rather than guess which feature to build next, each oracle below is handed
+perfect knowledge of **one** quantity. The gap to the baseline is the ceiling
+on what predicting that quantity well could ever buy
+(`analysis/oracles.py`, proxy population, 5-fold grouped by film).
+
+| oracle | MASE | ceiling |
+|---|---|---|
+| baseline | 0.3944 | — |
+| **A — the film's own national D4–D10 ratio curve** | **0.3039** | **+0.0905 (23%)** |
+| D — the pair's own 7-day total | 0.3214 | +0.0731 |
+| B — whether each row is zero | 0.3350 | +0.0595 |
+| C — the target date's national demand | 0.3867 | +0.0078 |
+
+Oracle A uses **no pair-level information at all** — just the film's aggregate
+ratio — and still beats the full per-pair baseline by 23%. The film-level curve
+is where the predictable signal lives.
+
+### This retracts §8
+
+Oracle C is the ceiling on the cross-film target-date signal: **+0.0078**.
+§8 argued that signal was "the biggest miss" because 66% of test rows have
+their target date observed by another film. The coverage claim is true, but the
+information is nearly worthless — a national date factor is almost collinear
+with day-of-week, which the model already has. §8's own measured result
+(−0.0021) was not a limitation of the median-table evaluator after all; it was
+the right answer. **Do not spend effort there.**
+
+### Two-stage decomposition
+
+`analysis/two_stage.py` tests whether the curve is actually *predictable*:
+
+```
+y[c,h] / scale[c]  ~  nat_r[h]  x  pair_factor[c,h]
+```
+
+| | MASE | gain |
+|---|---|---|
+| single-stage baseline | 0.3944 | — |
+| two-stage, stage 1 oracle | 0.3173 | +0.0771 |
+| **two-stage, stage 1 predicted** | **0.3828** | **+0.0116** |
+
+15% of the ceiling, using a stage 1 with only five binned features. Stage 1
+has genuine skill — 13–27% better than a global median per horizon — so a
+LightGBM stage 1 with richer film-level features should capture more.
+
+The decomposition is **not** applied multiplicatively in the notebook, because
+it regressed Wednesday D4 (0.692 → 0.741) while improving Thursday and Friday.
+The predicted curve is exposed as a **feature** (`film_curve`) instead, computed
+out of fold against the same film folds, so the tree can use it selectively.
+
+### Where the error actually sits
+
+| pattern | share of rows | MASE | contribution | share of total error |
+|---|---|---|---|---|
+| `111` | 90.58% | 0.3200 | 0.2899 | **73.5%** |
+| `001` | 1.99% | 2.8731 | 0.0572 | 14.5% |
+| `011` | 5.91% | 0.7070 | 0.0418 | 10.6% |
+| `101` | 1.52% | 0.3672 | 0.0056 | 1.4% |
+
+### `001` is irreducible — stop trying to fix it
+
+§6 called the `001` bucket a major lever. It is not fixable
+(`analysis/headroom.py`):
+
+| | MASE |
+|---|---|
+| current model | 2.8731 |
+| best possible single constant | 3.1073 |
+| oracle knowing the pair's own 7-day total | 2.5387 |
+
+The model already beats the best constant, and even that oracle only reaches
+2.539. True `y/scale` has median 1.510, mean 3.362, p90 7.973 — a pair that
+first opened on D3 has a genuinely unpredictable future. Total headroom across
+the whole bucket is ~**0.007**. Leave it alone; the real battleground is
+`111` at 73.5% of the error.
+
+One small free win: for `101` the model scores 0.3672 while simply predicting
+**zero** scores 0.3288. That bucket is 77.5% zeros with a true median of 0.
+
+### Anchor lags: fewer is better
+
+| anchor lags | training pairs | MASE |
+|---|---|---|
+| 0 only | 5,981 | 0.4105 |
+| **0–12** | **55,029** | **0.3943** |
+| 0–24 | 81,660 | 0.3944 |
+| 0–40 | 95,356 | 0.3958 |
+| 0–60 | 98,427 | 0.3956 |
+
+`0–12` matches `0–24` with 33% fewer rows, and going past 24 actively hurts.
+`ANCHOR_LAGS` is now `range(13)`, cutting training rows from 571,620 to
+385,203.
+
+### Ranked next steps
+
+1. **Move stage 1 to LightGBM.** Ceiling +0.077, currently banking +0.012 with
+   five binned features. Biggest remaining lever by a wide margin.
+2. **Add a proper two-part zero model** (the 0.46641 notebook's model Z, blend
+   weight 0.75). Oracle B ceiling is +0.0595; the per-horizon quantile snap is
+   only a crude stand-in for it.
+3. **Restore a blend** of 2–3 diverse models — worth ~0.004–0.010 on the
+   original notebook's own trace.
+4. Force `101` predictions toward zero (+0.0006, trivial).
+5. ~~Cross-film target-date features~~ — retracted, ceiling +0.008.
+6. ~~Dedicated `001` handling~~ — retracted, irreducible.
