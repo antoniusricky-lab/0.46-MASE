@@ -1,29 +1,3 @@
-# %% [markdown]
-# # Cinema ticket D4-D10 forecast - corrected pipeline
-#
-# Rebuild of the 0.46641 submission with the fixes from `FINDINGS.md`.
-#
-# **Design note.** Every data-handling and feature-engineering step below uses
-# only the Python standard library. `numpy` and `lightgbm` are touched in one
-# place (the training cell). That is deliberate: it keeps the pipeline
-# inspectable, and it means the whole thing still runs - with a weaker fallback
-# model - if LightGBM is unavailable.
-#
-# What changed versus the 0.46641 notebook:
-#
-# | # | Fix | Finding |
-# |---|---|---|
-# | 1 | Islamic-calendar features (`days_since_eid`, Ramadan, Xmas) | §1, §2 |
-# | 2 | Floor the ratio profile for Idulfitri-window rows | §2 |
-# | 3 | D1 = wide-release date, not first transaction | §5 |
-# | 4 | Explicit partial-activity (`001`/`011`) features | §6 |
-# | 5 | Decay learned per D1-day-of-week, no pooled `DECAY_PRIOR` | §7 |
-# | 6 | No regime reweighting - the test set is ~100% opening | §4, §5 |
-#
-# Outputs `submission.csv` plus `submission_no_eid_guard.csv` so the single
-# largest bet (fix 2) can be A/B tested on the leaderboard.
-
-# %%
 import csv
 import datetime as dt
 import math
@@ -68,15 +42,6 @@ print(f"train {len(train_raw):,} | test_history {len(hist_raw):,} | "
       f"test {len(test_raw):,} | movies {len(movies_raw)} | "
       f"holidays {len(hol_raw)} | prices {len(price_raw)} | "
       f"sample_sub {len(sub_raw):,}")
-
-# %% [markdown]
-# ## 1. Index the transaction tables
-#
-# `CELL_TR` / `CELL_TE` map `(movie, cluster, date) -> (tickets, occupancy,
-# shows)`. Training windows read from train.csv, test windows from
-# test_history.csv, so the two never mix.
-
-# %%
 CELL_TR, CELL_TE = {}, {}
 NCL_TR, NAT_TR = defaultdict(lambda: defaultdict(int)), defaultdict(lambda: defaultdict(int))
 MDC_TR, MDC_TE = defaultdict(list), defaultdict(list)
@@ -107,21 +72,6 @@ TMIN, TMAX = min(NAT_DAY), max(NAT_DAY)
 print(f"train dates {TMIN} .. {TMAX}")
 print(f"clusters: train {len({r['cinema_ids'] for r in train_raw})} | "
       f"test {len({r['cinema_ids'] for r in test_raw})}")
-
-# %% [markdown]
-# ## 2. Fix 3 - D1 is the wide-release date
-#
-# FINDINGS §5: 44% of train films first appear as a 1-4 cluster sneak preview
-# 1-9 days before the real wide release. Using that as the anchor origin
-# mislabels the whole regime axis.
-#
-# Definition: the first day inside the film's first 10 days that reaches >=25%
-# of its peak cluster count in that span.
-#
-# For test films this reduces to `min(date)` in test_history by construction,
-# since only three days are given.
-
-# %%
 _first = {m: min(v) for m, v in NAT_TR.items()}
 LEFT_CENSORED = {m for m in _first if _first[m] == TMIN}
 
@@ -154,16 +104,6 @@ for w in range(7):
     print(f"{DOWN[w]:6s}{_dow_first[w]:18d}{_dow_rel[w]:14d}")
 print("-> release dow should now be Wed/Thu/Fri heavy, matching the test set")
 print(f"test D1 dow: {dict(sorted(Counter(d.weekday() for d in D1_TE.values()).items()))}")
-
-# %% [markdown]
-# ## 3. Verify the two proven structural rules
-#
-# FINDINGS §3: a pair is forecast **iff** it sold a ticket on D3.
-# FINDINGS §4: D1 is a weekly release slot, so the test set is ~100% opening
-# windows. If either assertion fails, the rest of this notebook's reasoning
-# does not apply to your files.
-
-# %%
 _act = defaultdict(set)
 for r in hist_raw:
     m, c, d = r["movie_title"], r["cinema_ids"], D(r["date_show"])
@@ -188,24 +128,6 @@ _offs = Counter((D(r["date_show"]) - D1_TE[r["movie_title"]]).days for r in test
 print(f"test offsets (expect 3..9 = D4..D10): {dict(sorted(_offs.items()))}")
 assert set(_offs) == {3, 4, 5, 6, 7, 8, 9}
 print("all structural assertions passed")
-
-# %% [markdown]
-# ## 4. Fix 1 - calendar features including the Islamic calendar
-#
-# FINDINGS §1: MASE on calendar-anomaly days is 0.849 versus 0.359 on ordinary
-# days (2.37x). Anomalies are 7.1% of train rows but **31.8% of test rows**.
-# Train contains no Ramadan at all and `holidays.csv` never labels it, so
-# 18.2% of the test set currently has no feature that can represent it.
-#
-# `days_since_eid` is the bridge that *is* learnable: April 2025 is the
-# Idulfitri 1446 aftermath, giving 800+ train rows for each of Eid+1..Eid+13 -
-# which covers 6 of the 7 target days of the 2026-03-18 cohort.
-#
-# Eid dates are the first day of Syawal as observed in Indonesia. They are
-# hardcoded because `holidays.csv` starts on 2025-04-01 and therefore only
-# labels Eid+1 for 1446 H, which would misalign the two years by a day.
-
-# %%
 EID_DATES = [dt.date(2025, 3, 31), dt.date(2026, 3, 21)]
 RAMADAN_LEN = 30
 
@@ -331,15 +253,6 @@ _tot = len(test_raw)
 print("\ntest rows by calendar regime:")
 for k, lab in ((0, "ordinary"), (2, "ramadan"), (1, "eid window"), (3, "xmas/NY")):
     print(f"  {lab:12s} {_tc[k]:7d} ({100 * _tc[k] / _tot:5.1f}%)")
-
-# %% [markdown]
-# ## 5. Static reference tables
-#
-# Cluster behaviour is always taken from `train.csv` (clusters are shared
-# between periods). Film metadata, city prices and title format flags come from
-# the reference files.
-
-# %%
 _cl_daily = defaultdict(list)
 _cl_shows = defaultdict(list)
 _cl_occ = defaultdict(list)
@@ -417,19 +330,6 @@ for m in set(list(NAT_TR) + list(D1_TE)):
     TITLE[m] = title_feats(m)
 print(f"title metadata matched for "
       f"{sum(1 for m in TITLE if TITLE[m][7])}/{len(TITLE)} films")
-
-# %% [markdown]
-# ## 6. Window construction
-#
-# One window per (film, anchor lag). Three observation days, seven target days.
-# Pairs are kept only when they sold a ticket on D3, replicating the proven
-# test rule exactly (FINDINGS §3).
-#
-# Training uses lags 0..24. Restricting to lag 0 was **tested and is worse**
-# (0.4024 vs 0.3932) - volume wins, so the multi-anchor idea from the original
-# notebook is kept.
-
-# %%
 def build_windows(films, d1_of, cell, mdc, lags, require_d3=True, dow_filter=None):
     """-> list of (film, cluster, d1, s[3], occ[3], sh[3], y[7] or None)"""
     out = []
@@ -470,14 +370,6 @@ assert 7 * len(TEST_W) == len(test_raw), (
     f"test windows {7 * len(TEST_W)} != test rows {len(test_raw)}")
 
 _proxy_keys = {(w[0], w[1], w[2]) for w in PROXY_W}
-
-# %% [markdown]
-# ## 7. Film-level aggregates over the observation window
-#
-# Computed from whichever history the window came from, so train and test
-# definitions stay identical.
-
-# %%
 def scbin(x):
     for i, b in enumerate((5, 10, 25, 50, 100, 250, 600)):
         if x <= b:
@@ -622,21 +514,6 @@ print("  predicted national ratio by horizon (test windows):")
 for h in range(7):
     v = [FC[(k[0], k[1], h)] for k in AGG_TEST]
     print(f"    D{h + 4:<3d} median {_median(v):.3f}")
-
-# %% [markdown]
-# ## 8. Feature builder
-#
-# Fix 4 (FINDINGS §6): the `001` / `011` activity patterns are 8% of rows but
-# 25% of the error, because `scale` averages over days the pair was not
-# screening. `scale_deflation`, `run_rate` and `last_over_scale` hand the model
-# that correction directly instead of making a tree rediscover it.
-#
-# Fix 5 (FINDINGS §7): no pooled `DECAY_PRIOR`. `d1_dow` is a feature and
-# `off` is a feature, so the tree learns a separate decay per release weekday -
-# the median ratio at D4 is 1.114 for Wednesday releases but 0.454 for Friday
-# ones, a 2.5x spread the single pooled curve destroyed.
-
-# %%
 PAIR_NAMES = [
     "s1", "s2", "s3", "occ1", "occ2", "occ3", "sh1", "sh2", "sh3",
     "sum3", "scale", "log_scale",
@@ -768,18 +645,6 @@ _probe = next(iter_rows(TRAIN_W[:1], AGG_TRAIN, RANK_TRAIN))
 assert len(_probe[6]) == len(FEATS), f"{len(_probe[6])} values vs {len(FEATS)} names"
 print(f"feature vector length verified: {len(_probe[6])}")
 print("sample:", {k: round(v, 3) for k, v in list(zip(FEATS, _probe[6]))[:8]})
-
-
-# %% [markdown]
-# ## 9. One streaming pass: row metadata (+ the feature matrix if numpy exists)
-#
-# `meta` carries everything the calibration, diagnostics, Eid guard and
-# submission writer need, as plain Python tuples. Those stages therefore do not
-# depend on numpy at all. The dense matrix is built in the same pass, only when
-# numpy is available, and rows go straight into a preallocated array so the
-# features never exist as Python objects.
-
-# %%
 try:
     import gc
 
@@ -859,24 +724,6 @@ if HAS_NP:
     assert np.isfinite(TR_X).all(), "non-finite value in the training matrix"
     assert np.isfinite(TE_X).all(), "non-finite value in the test matrix"
     print(f"matrices: train {TR_X.shape} test {TE_X.shape} (finite check passed)")
-
-# %% [markdown]
-# ## 10. Model
-#
-# L1 objective on the ratio target, because MASE is exactly MAE on `y/scale`.
-# Folds are grouped by film, so no film is ever split across a fold boundary.
-#
-# Fix 6: **no regime reweighting.** The 0.46641 notebook reweighted training
-# toward an estimated 13.7% "opening" mix and then chose its feature set and
-# blend weights by that weighted MASE. FINDINGS §4 proves the test set is
-# ~100% opening windows, so the weighting optimised the wrong quantity.
-#
-# If LightGBM is missing the notebook falls back to a hierarchical median
-# lookup on `(off, d1_dow, pattern, scale bin)`. That scores about 0.393 on the
-# proxy population, so it still produces a usable submission - just a weaker
-# one than the boosted model.
-
-# %%
 LGB_PARAMS = dict(
     objective="l1", metric="l1",
     learning_rate=0.04, num_leaves=160, min_data_in_leaf=120,
@@ -1020,28 +867,6 @@ print(f"\nOOF MASE, all anchors : {OOF_ALL:.4f}")
 print(f"OOF MASE, proxy only  : {OOF_PROXY:.4f}  <- the honest estimate")
 if ITERS:
     print(f"mean best_iteration   : {sum(ITERS) / len(ITERS):.0f}")
-
-# %% [markdown]
-# ## 10b. Model Z - two-part zero model
-#
-# Oracle B (`analysis/oracles.py`) says perfect knowledge of which rows are
-# zero is worth **+0.0595** - the second largest lever after the film curve.
-# The per-horizon quantile snap in cell 12 is a crude proxy for it; this is
-# the real thing, and it is what the 0.46641 notebook's model Z did at blend
-# weight 0.75.
-#
-# Two heads on the same feature matrix:
-#
-# * a binary classifier for `P(y_ratio == 0)`
-# * an L1 regressor fitted on the **positive rows only**
-#
-# Combined through a per-decile multiplier on `p0`, fitted on out-of-fold
-# MASE. Under L1 the optimal action is to predict 0 once `P(zero) > 0.5`, and
-# the multiplier learns that boundary from data rather than assuming it.
-#
-# The blend weight against the main model is also fitted on the proxy rows.
-
-# %%
 PARAMS_CLF = dict(
     objective="binary", metric="binary_logloss",
     learning_rate=0.05, num_leaves=127, min_data_in_leaf=150,
@@ -1234,16 +1059,6 @@ if Z_OK:
 else:
     BLEND_W = 1.0
     print("model Z skipped (needs LightGBM); using the main model alone")
-
-# %% [markdown]
-# ## 11. The diagnostics that actually matter
-#
-# Overall OOF hid the problem that cost the 0.46641 submission its score, so
-# the breakdown by calendar regime and by activity pattern is printed
-# explicitly. Compare the regime rows against FINDINGS §1 (ordinary 0.359 vs
-# anomaly 0.849) and the pattern rows against §6.
-
-# %%
 def report(pred, title):
     print(f"--- {title} ---")
 
@@ -1289,40 +1104,6 @@ if LAST_IMP:
           f" of {len(LAST_IMP)}")
     print("  -> if this is near zero the stage-1 curve is not being used and")
     print("     cell 9's film-curve block needs richer features.")
-
-# %% [markdown]
-# ## 12. Post-hoc calibration
-#
-# **Rewritten after the first leaderboard result (0.47789 vs 0.46641).**
-# The failure was here, not in the features. Cell 11 was healthy -
-# ordinary-day MASE 0.3175 and pattern `111` at 0.2662 both beat the previous
-# submission - but the far horizons shipped at roughly the conditional MEAN
-# when MASE is L1 and rewards the MEDIAN:
-#
-# | horizon | true median | shipped | the 0.46641 notebook |
-# |---|---|---|---|
-# | D8  | 0.117 | 0.401 | 0.183 |
-# | D9  | 0.000 | 0.375 | 0.142 |
-# | D10 | 0.000 | 0.358 | 0.132 |
-#
-# That alone accounts for roughly +0.034 on a constant-predictor proxy,
-# against a measured gap of +0.016. Three causes, all here:
-#
-# 1. the multiplier grid ran 0.80..1.30, and D9/D10 **pinned to the lower
-#    bound** - the optimum was outside the grid
-# 2. the zero-snap was a single global threshold searched over 0..0.40, but
-#    LightGBM emits ~0.4-0.5 at D8-D10, so it snapped almost nothing: 21-23%
-#    zeros against a true 46-59%
-# 3. calibration was fitted on single-model out-of-fold predictions and then
-#    applied to a 3-seed average, which is a smoother distribution
-#
-# The snap is now a **quantile** per horizon rather than an absolute
-# threshold. If out-of-fold says 55% of D9 rows should be zero, the lowest 55%
-# of D9 test predictions are zeroed - scale-free, so it transfers even when
-# the refit model's output distribution shifts. Fix 3 is handled in cell 10 by
-# using one seed list for both CV and refit.
-
-# %%
 MULT_GRID = [x / 100.0 for x in range(20, 141, 2)]
 SNAP_QGRID = [x / 100.0 for x in range(0, 91, 2)]
 
@@ -1390,14 +1171,6 @@ for h in range(4, 11):
           f"{_median(yv):12.3f} {_median(pv):12.3f}")
 
 report(OOF_C, "OOF, calibrated")
-
-# %% [markdown]
-# ## 13. Refit on all rows and predict the test set
-#
-# Refit on 100% of the training rows, rounds = mean best iteration x 1.1 to
-# compensate for the extra data, averaged over three seeds to cut variance.
-
-# %%
 PRED = [0.0] * len(TE_META)
 if HAS_LGB:
     SEEDS = MODEL_SEEDS
@@ -1468,24 +1241,6 @@ for h in range(4, 11):
     v = _byoff[h]
     print(f"  D{h:<3d} mean {sum(v) / len(v):.3f}  "
           f"zeros {100 * sum(1 for x in v if x == 0) / len(v):5.1f}%")
-
-# %% [markdown]
-# ## 14. Fix 2 - the Idulfitri guard
-#
-# FINDINGS §2. Seven films release 2026-03-18 and their **entire** D4-D10
-# window is the Idulfitri 1447 H holiday week: 631 pairs, 4,417 rows, 6.08% of
-# the test set. It sits at the end of the period, so it is likely concentrated
-# in the private leaderboard.
-#
-# The 0.46641 submission has that cohort decaying from 0.952 to 0.132, while
-# the April 2025 analogue (Idulfitri 1446 aftermath) shows the week after Eid
-# running at or above the Eid weekend itself. Train has 800+ rows for each of
-# Eid+1..Eid+6, which covers six of this cohort's seven target days.
-#
-# This is a **floor**, not a multiplier - it can only raise rows whose target
-# day falls inside an Eid window, and leaves every other row untouched.
-
-# %%
 # Rows that straddle INTO an Eid window: target day inside it, observation
 # window outside it. That is exactly the 2026-03-18 cohort's situation, and it
 # is the only case where `scale` is measured in one demand regime and the
@@ -1612,16 +1367,6 @@ if _fm:
               f"{sum(_fm[i] for i in ii) / len(ii):9.3f}")
 else:
     print("\n  guard disabled")
-
-# %% [markdown]
-# ## 15. Write the submissions
-#
-# Two files, so the single largest bet can be isolated on the leaderboard:
-# `submission.csv` has every fix including the Idulfitri guard,
-# `submission_no_eid_guard.csv` has everything except it. Submit both and the
-# difference tells you whether the prior was right.
-
-# %%
 TEST_ID = {}
 for r in test_raw:
     TEST_ID[(r["movie_title"], r["cinema_ids"], D(r["date_show"]))] = r["id"]
