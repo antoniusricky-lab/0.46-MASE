@@ -40,8 +40,8 @@ TEST_D1_DOW = {2, 3, 4}         # Wed/Thu/Fri = 96% of test films
 N_FOLDS = 5
 LABEL_CLIP_Q = 0.999
 EID_GUARD = True                # fix 2
-EID_GUARD_MODE = "calendar"     # "calendar" | "flat" | "none"
-EID_GUARD_K = 0.6               # calendar: floor = K * uplift ; flat: floor = K
+EID_GUARD_MODE = "flat"         # "calendar" | "flat" | "none"
+EID_GUARD_K = 1.0               # calendar: floor = K * uplift ; flat: floor = K
 
 print(f"SEED={SEED}  ANCHOR_LAGS={ANCHOR_LAGS[0]}..{ANCHOR_LAGS[-1]}  "
       f"folds={N_FOLDS}  eid_guard={EID_GUARD} ({EID_GUARD_MODE} K={EID_GUARD_K})")
@@ -769,6 +769,10 @@ LGB_PARAMS = dict(
     data_random_seed=SEED + 3, extra_seed=SEED + 4,
 )
 NUM_ROUNDS, EARLY_STOP = 3000, 150
+# Cause 3 of the 0.47789 regression: calibration was fitted on single-model
+# out-of-fold predictions but applied to a seed-averaged refit. Use ONE seed
+# list for both so the two distributions match.
+MODEL_SEEDS = [SEED, SEED + 101]
 CAT_IDX_LGB = CAT_IDX
 
 try:
@@ -831,17 +835,19 @@ def fb_predict(model, r):
 
 
 # ---------------------------------------------------------------- lightgbm
-def lgb_fit(Xa, ya, Xb, yb):
+def lgb_fit(Xa, ya, Xb, yb, seed=SEED):
+    params = dict(LGB_PARAMS, seed=seed, bagging_seed=seed + 1,
+                  feature_fraction_seed=seed + 2, data_random_seed=seed + 3)
     dtr = lgb.Dataset(Xa, label=ya, categorical_feature=CAT_IDX_LGB,
                       feature_name=list(FEATS), free_raw_data=False)
     dva = lgb.Dataset(Xb, label=yb, reference=dtr)
     try:
-        mdl = lgb.train(LGB_PARAMS, dtr, num_boost_round=NUM_ROUNDS,
+        mdl = lgb.train(params, dtr, num_boost_round=NUM_ROUNDS,
                         valid_sets=[dva],
                         callbacks=[lgb.early_stopping(EARLY_STOP, verbose=False),
                                    lgb.log_evaluation(0)])
     except (TypeError, AttributeError):
-        mdl = lgb.train(LGB_PARAMS, dtr, num_boost_round=NUM_ROUNDS,
+        mdl = lgb.train(params, dtr, num_boost_round=NUM_ROUNDS,
                         valid_sets=[dva], early_stopping_rounds=EARLY_STOP,
                         verbose_eval=False)
     return mdl, (getattr(mdl, "best_iteration", None) or NUM_ROUNDS)
@@ -864,12 +870,17 @@ for f in range(N_FOLDS):
         tr_i = np.flatnonzero(np.array(FOLD) != f)
         va_i = np.flatnonzero(np.array(FOLD) == f)
         ya = np.asarray(Y_TR_C, dtype=np.float64)
-        mdl, it = lgb_fit(TR_X[tr_i], ya[tr_i], TR_X[va_i], ya[va_i])
-        pv = np.clip(mdl.predict(TR_X[va_i], num_iteration=it), 0, None)
+        pv = np.zeros(len(va_i))
+        it = 0
+        for sd in MODEL_SEEDS:
+            mdl, it_s = lgb_fit(TR_X[tr_i], ya[tr_i], TR_X[va_i], ya[va_i], sd)
+            pv += np.clip(mdl.predict(TR_X[va_i], num_iteration=it_s), 0,
+                          None) / len(MODEL_SEEDS)
+            it = max(it, it_s)
+            del mdl
         for j, i in enumerate(va_i):
             OOF[int(i)] = float(pv[j])
         ITERS.append(it)
-        del mdl
     else:
         mdl = fb_fit(TR_META, Y_TR_C, keep)
         it = 0
@@ -932,38 +943,103 @@ report(OOF, "OOF, uncalibrated")
 # %% [markdown]
 # ## 12. Post-hoc calibration
 #
-# A per-horizon multiplier plus a zero-snap threshold, both found by direct
-# search on MASE over the **proxy** out-of-fold predictions - not over all
-# anchors - so the calibration targets the distribution actually being scored.
+# **Rewritten after the first leaderboard result (0.47789 vs 0.46641).**
+# The failure was here, not in the features. Cell 11 was healthy -
+# ordinary-day MASE 0.3175 and pattern `111` at 0.2662 both beat the previous
+# submission - but the far horizons shipped at roughly the conditional MEAN
+# when MASE is L1 and rewards the MEDIAN:
+#
+# | horizon | true median | shipped | the 0.46641 notebook |
+# |---|---|---|---|
+# | D8  | 0.117 | 0.401 | 0.183 |
+# | D9  | 0.000 | 0.375 | 0.142 |
+# | D10 | 0.000 | 0.358 | 0.132 |
+#
+# That alone accounts for roughly +0.034 on a constant-predictor proxy,
+# against a measured gap of +0.016. Three causes, all here:
+#
+# 1. the multiplier grid ran 0.80..1.30, and D9/D10 **pinned to the lower
+#    bound** - the optimum was outside the grid
+# 2. the zero-snap was a single global threshold searched over 0..0.40, but
+#    LightGBM emits ~0.4-0.5 at D8-D10, so it snapped almost nothing: 21-23%
+#    zeros against a true 46-59%
+# 3. calibration was fitted on single-model out-of-fold predictions and then
+#    applied to a 3-seed average, which is a smoother distribution
+#
+# The snap is now a **quantile** per horizon rather than an absolute
+# threshold. If out-of-fold says 55% of D9 rows should be zero, the lowest 55%
+# of D9 test predictions are zeroed - scale-free, so it transfers even when
+# the refit model's output distribution shifts. Fix 3 is handled in cell 10 by
+# using one seed list for both CV and refit.
 
 # %%
-CAL_MULT = {}
+def quantile(v, q):
+    v = sorted(v)
+    if not v:
+        return 0.0
+    return v[min(int(q * (len(v) - 1)), len(v) - 1)]
+
+
+MULT_GRID = [x / 100.0 for x in range(20, 141, 2)]
+SNAP_QGRID = [x / 100.0 for x in range(0, 91, 2)]
+
+CAL_MULT, CAL_SNAPQ = {}, {}
 for h in range(4, 11):
-    sel = [PROXY_MASK[i] and r[M_OFF] == h for i, r in enumerate(TR_META)]
-    idx = [i for i, s in enumerate(sel) if s]
+    idx = [i for i, r in enumerate(TR_META) if PROXY_MASK[i] and r[M_OFF] == h]
     best, bv = 1.0, None
-    for mu100 in range(80, 131, 2):
-        mu = mu100 / 100.0
-        v = sum(abs(Y_TR[i] - OOF[i] * mu) for i in idx) / max(len(idx), 1)
+    for mu in MULT_GRID:
+        v = sum(abs(Y_TR[i] - OOF[i] * mu) for i in idx) / len(idx)
         if bv is None or v < bv:
             best, bv = mu, v
     CAL_MULT[h] = best
-print("per-horizon multipliers:", CAL_MULT)
+    sp = [OOF[i] * best for i in idx]
+    bq, bvq = 0.0, None
+    for q in SNAP_QGRID:
+        thr = quantile(sp, q)
+        v = sum(abs(Y_TR[i] - (0.0 if OOF[i] * best <= thr else OOF[i] * best))
+                for i in idx) / len(idx)
+        if bvq is None or v < bvq:
+            bq, bvq = q, v
+    CAL_SNAPQ[h] = bq
 
-OOF_C = [OOF[i] * CAL_MULT[r[M_OFF]] for i, r in enumerate(TR_META)]
+_pin = [h for h in range(4, 11) if CAL_MULT[h] <= MULT_GRID[0] + 1e-9]
+print("per-horizon multipliers:",
+      {h: round(CAL_MULT[h], 2) for h in range(4, 11)})
+print(f"  pinned to the grid floor: {_pin or 'none'}"
+      f"{'   <-- WIDEN MULT_GRID' if _pin else ''}")
+print("per-horizon zero-snap quantiles:",
+      {h: round(CAL_SNAPQ[h], 2) for h in range(4, 11)})
 
-PIDX = [i for i, s in enumerate(PROXY_MASK) if s]
-ZERO_SNAP, bv = 0.0, None
-for z100 in range(0, 41, 2):
-    z = z100 / 100.0
-    v = sum(abs(Y_TR[i] - (0.0 if OOF_C[i] < z else OOF_C[i]))
-            for i in PIDX) / len(PIDX)
-    if bv is None or v < bv:
-        ZERO_SNAP, bv = z, v
-OOF_C = [0.0 if v < ZERO_SNAP else v for v in OOF_C]
-print(f"zero-snap threshold: {ZERO_SNAP:.2f}")
-print(f"proxy MASE  raw {OOF_PROXY:.4f} -> calibrated "
+
+def apply_cal(pred, meta):
+    """Multiplier then per-horizon quantile snap, computed within `pred`."""
+    out = [max(0.0, pred[i] * CAL_MULT[r[M_OFF]]) for i, r in enumerate(meta)]
+    for h in range(4, 11):
+        idx = [i for i, r in enumerate(meta) if r[M_OFF] == h]
+        if not idx:
+            continue
+        thr = quantile([out[i] for i in idx], CAL_SNAPQ[h])
+        for i in idx:
+            if out[i] <= thr:
+                out[i] = 0.0
+    return out
+
+
+OOF_C = apply_cal(OOF, TR_META)
+print(f"\nproxy MASE  raw {OOF_PROXY:.4f} -> calibrated "
       f"{mase(Y_TR, OOF_C, PROXY_MASK):.4f}")
+
+print("\nzero share by horizon, proxy rows (the thing that was wrong):")
+print(f"  {'D':>4s} {'true':>8s} {'predicted':>10s} {'true median':>12s} "
+      f"{'pred median':>12s}")
+for h in range(4, 11):
+    idx = [i for i, r in enumerate(TR_META) if PROXY_MASK[i] and r[M_OFF] == h]
+    yv = [Y_TR[i] for i in idx]
+    pv = [OOF_C[i] for i in idx]
+    print(f"  D{h:<3d} {sum(1 for x in yv if x == 0) / len(yv):8.3f} "
+          f"{sum(1 for x in pv if x == 0) / len(pv):10.3f} "
+          f"{_median(yv):12.3f} {_median(pv):12.3f}")
+
 report(OOF_C, "OOF, calibrated")
 
 # %% [markdown]
@@ -975,7 +1051,7 @@ report(OOF_C, "OOF, calibrated")
 # %%
 PRED = [0.0] * len(TE_META)
 if HAS_LGB:
-    SEEDS = [SEED, SEED + 101, SEED + 202]
+    SEEDS = MODEL_SEEDS
     n_round = max(int(sum(ITERS) / len(ITERS) * 1.1), 200)
     ya = np.asarray(Y_TR_C, dtype=np.float64)
     acc = np.zeros(len(TE_META))
@@ -993,8 +1069,7 @@ else:
     mdl = fb_fit(TR_META, Y_TR_C, [True] * len(TR_META))
     PRED = [fb_predict(mdl, r) for r in TE_META]
 
-PRED = [max(0.0, PRED[i] * CAL_MULT[r[M_OFF]]) for i, r in enumerate(TE_META)]
-PRED = [0.0 if v < ZERO_SNAP else v for v in PRED]
+PRED = apply_cal(PRED, TE_META)
 PRED_RAW = list(PRED)
 
 _byoff = defaultdict(list)

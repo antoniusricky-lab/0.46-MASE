@@ -448,3 +448,123 @@ against §6.
 The proxy MASE is **not** a leaderboard estimate. The proxy population contains
 no Ramadan, because train contains none, so the leaderboard will read higher.
 §1 gives the reweighting arithmetic.
+
+---
+
+## Post-mortem: the first corrected submission scored 0.47789
+
+Worse than the 0.46641 baseline. The A/B pair isolated the cause immediately.
+
+| submission | LB |
+|---|---|
+| 0.46641 notebook | **0.46641** |
+| corrected, no Eid guard | 0.48267 |
+| corrected, with Eid guard (`calendar 0.6`) | 0.47789 |
+
+Two separate conclusions:
+
+**The Eid guard worked.** 0.48267 → 0.47789, a real **−0.00478** on 6.08% of
+rows. §2 was right, and it was set too timid — see below.
+
+**The model regressed by +0.0163**, and it was not the features. Cell 11 was
+healthy: ordinary-day MASE **0.3175** and pattern `111` at **0.2662**, both
+well below what the median-table fallback gets (0.380 / 0.322). The features
+are doing their job.
+
+### The actual bug: far horizons shipped at the mean, not the median
+
+MASE is L1, so the optimal prediction is the conditional **median**. The
+submission sat near the conditional **mean** at D8–D10:
+
+| horizon | true median | true zero share | shipped | shipped zeros | 0.46641 |
+|---|---|---|---|---|---|
+| D7 | 0.335 | 30.2% | 0.490 | 17.7% | 0.344 |
+| D8 | 0.117 | 45.5% | 0.401 | 20.7% | 0.183 |
+| D9 | **0.000** | 53.9% | 0.375 | 21.8% | 0.142 |
+| D10 | **0.000** | 59.1% | 0.358 | 22.6% | 0.132 |
+
+Predicting 22% zeros where 59% are truly zero. On a constant-predictor proxy
+that costs **+0.0342**, against the measured +0.0163 — the proxy overstates
+magnitude, but the sign and the concentration in D8–D10 are unambiguous
+(`analysis/level_error.py`).
+
+Three causes, all in the calibration cell:
+
+1. **The multiplier grid was clipped.** It ran `range(80,131,2)` = 0.80–1.30,
+   and D9/D10 both returned 0.80 — pinned to the lower bound, so the optimum
+   was outside the grid. Unclipped, the median model wants 0.72.
+2. **The zero-snap was a single global absolute threshold** searched over
+   0–0.40. LightGBM emits ~0.4–0.5 at D8–D10, so a 0.18 threshold snapped
+   almost nothing. One threshold cannot serve a zero share that runs from 12%
+   at D4 to 59% at D10.
+3. **Calibration was fitted on single-model out-of-fold predictions and
+   applied to a 3-seed average** — a smoother distribution, so the threshold
+   transferred badly.
+
+Worth noting: bugs 1 and 2 are worth only **+0.0008** to the median-table
+fallback (`analysis/calib_bug.py`), which is why the offline run never flagged
+them. They matter specifically because LightGBM's far-horizon output is
+smooth and never exactly zero, where the median table emits hard zeros. The
+fallback that made the pipeline testable also masked this.
+
+### The fix
+
+The snap is now a **quantile per horizon** instead of an absolute threshold.
+If out-of-fold says 55% of D9 rows should be zero, the lowest 55% of D9 test
+predictions are zeroed. That is scale-free, so it transfers even when the
+refit model's output distribution shifts — which is exactly what bug 3 was.
+The multiplier grid is widened to 0.20–1.40 and the cell now warns if any
+horizon pins to the floor. One seed list is used for both CV and refit.
+
+Resulting profile (median-table fallback, so LightGBM will differ in level but
+not in mechanism):
+
+| horizon | true zeros | before fix | after fix |
+|---|---|---|---|
+| D8 | 45.5% | 20.7% | 63.0% |
+| D9 | 53.9% | 21.8% | 73.2% |
+| D10 | 59.1% | 22.6% | 75.3% |
+
+### The guard was too timid
+
+Train's only Eid analogue — windows inside the Idulfitri 1446 aftermath,
+1,470 rows — says Eid target days run far above ordinary ones
+(`analysis/eid_premise.py`):
+
+| rows | median y/scale | mean | zero share |
+|---|---|---|---|
+| Eid-window target days | **1.880** | 2.360 | 14.6% |
+| all other days | 0.357 | 0.587 | 35.3% |
+
+Optimal floor on those rows: `calendar K≈1.5` (MASE 2.035 → 1.302) or
+`flat K≈1.9`. The shipped `calendar 0.6` only reached 1.784.
+
+Independently, the measured −0.00478 can be matched against the strategy
+table. `calendar 0.6` was predicted to gain −0.0043 if the truth is flat 1.0,
+and −0.0080 under every ×uplift scenario. The measurement lands on the flat-1.0
+row, under which **`flat 1.0` is the optimal strategy** — worth roughly a
+further −0.012. That is now the default.
+
+Caveat: that is one scalar measurement used to pick among seven scenarios, so
+it is suggestive rather than proven, and `flat 1.0` carries worst-case regret
+of +0.0228 if demand collapses instead. `calendar 0.5` remains the minimax
+choice at −0.0014. The A/B pair still isolates it.
+
+### How to read the next two submissions
+
+| comparison | isolates |
+|---|---|
+| `submission_no_eid_guard.csv` vs 0.48267 | the calibration fix alone |
+| `submission.csv` vs `submission_no_eid_guard.csv` | the stronger guard alone |
+
+### What this says about the approach
+
+Replacing a working 4-model ensemble with a single model was the wrong move
+even though the diagnosis behind it was sound. The 0.46641 notebook's own
+trace shows what its ensemble bought: Model A alone 0.4697 → blend 0.4654 →
++calibration 0.4530 → +feature selection 0.4409 → **+two-part model 0.4328**.
+Its two-part model carried blend weight 0.75 and exists precisely to get the
+far-horizon zeros right — the thing that broke here.
+
+The quantile snap is now a crude stand-in for it. If more is needed, port
+these fixes into that notebook and keep its blend rather than replacing it.
