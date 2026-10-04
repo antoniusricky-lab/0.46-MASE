@@ -1052,7 +1052,25 @@ PARAMS_CLF = dict(
 )
 PARAMS_POS = dict(LGB_PARAMS, seed=SEED + 404, bagging_seed=SEED + 405,
                   feature_fraction_seed=SEED + 406, data_random_seed=SEED + 407)
-RUN_Z = True
+# DISABLED on leaderboard evidence. Model Z improved the proxy every time and
+# destroyed the leaderboard every time:
+#
+#   no Z   proxy ~0.337   LB 0.46795
+#   +Z     proxy  0.3377  LB 0.52220  (no-guard variant)
+#   +Z     proxy  0.3348  LB 0.53421  (best proxy ever, worst LB ever)
+#
+# analysis/z_shift.py rules out the obvious mechanical cause: rank-based
+# decile mapping scores the same as absolute edges (0.4002 vs 0.3999), so it
+# is not a threshold-transfer bug like the zero-snap was. What remains is that
+# forcing exact zeros is ONE-SIDED - a wrongly zeroed row loses the entire
+# true ratio, so the downside is unbounded while the upside is capped. That is
+# optimal under a matched distribution and reckless under the calendar shift
+# between Apr-Sep train and Oct-Mar test.
+#
+# Set True only to reproduce the failure. MAX_Z_WEIGHT stops the blend from
+# handing it everything if it is re-enabled.
+RUN_Z = False
+MAX_Z_WEIGHT = 0.35
 
 
 def lgb_fit_generic(params, Xa, ya, Xb, yb, rounds=NUM_ROUNDS):
@@ -1209,7 +1227,8 @@ if RUN_Z and HAS_LGB:
 
 if Z_OK:
     best_w, bv = 1.0, None
-    for w100 in range(0, 101, 5):
+    _lo = int(round((1.0 - MAX_Z_WEIGHT) * 100))
+    for w100 in range(_lo, 101, 5):
         w = w100 / 100.0
         cand = [w * OOF_MAIN[i] + (1 - w) * OOF_Z[i] for i in range(len(TR_META))]
         v = mase(Y_TR, cand, PROXY_MASK)
@@ -1222,10 +1241,7 @@ if Z_OK:
         cand = [w * OOF_MAIN[i] + (1 - w) * OOF_Z[i] for i in range(len(TR_META))]
         mark = "  <- chosen" if abs(w - BLEND_W) < 1e-9 else ""
         print(f"    main={w:.1f}  {mase(Y_TR, cand, PROXY_MASK):.4f}{mark}")
-    if BLEND_W < 0.10:
-        print("  NOTE: the blend discards the main model. If the curve above is")
-        print("  flat below main=0.2, prefer a small non-zero weight for")
-        print("  diversification - the proxy has only 144 films.")
+    print(f"  (main weight floored at {1.0 - MAX_Z_WEIGHT:.2f} by MAX_Z_WEIGHT)")
     OOF = [BLEND_W * OOF_MAIN[i] + (1 - BLEND_W) * OOF_Z[i]
            for i in range(len(TR_META))]
     OOF_PROXY = mase(Y_TR, OOF, PROXY_MASK)
@@ -1234,6 +1250,56 @@ if Z_OK:
 else:
     BLEND_W = 1.0
     print("model Z skipped (needs LightGBM); using the main model alone")
+
+# %% [markdown]
+# ## 10c. Time-based holdout - the gate the proxy could not provide
+#
+# The proxy is a **random** split over films, so it measures "unseen film,
+# same period". The leaderboard is "unseen film, **later** period". Those
+# differ, and the gap is exactly where model Z failed: it improved the proxy
+# from 0.3497 to 0.3359 while moving the leaderboard from 0.46795 to 0.53421.
+#
+# The original 0.46641 notebook had this split (its cell 11) and this pipeline
+# dropped it. That omission is why two bad submissions got spent.
+#
+# Train on the earliest 75% of films by release date, score the latest 25%.
+# Treat it as a **gate**: if a change improves the proxy but not this, do not
+# ship it.
+
+# %%
+_rel = sorted(RELEASE_TR.items(), key=lambda kv: kv[1])
+HO_CUT = _rel[int(0.75 * len(_rel))][1]
+HO_LATE = {m for m, d in RELEASE_TR.items() if d >= HO_CUT}
+print(f"cutoff {HO_CUT} | early films {len(RELEASE_TR) - len(HO_LATE)} | "
+      f"late films {len(HO_LATE)}")
+
+ho_tr = [i for i, r in enumerate(TR_META) if r[M_FILM] not in HO_LATE]
+ho_va = [i for i, r in enumerate(TR_META)
+         if r[M_FILM] in HO_LATE and PROXY_MASK[i]]
+print(f"holdout: train rows {len(ho_tr):,} | validation rows {len(ho_va):,}")
+
+if HAS_LGB and ho_va:
+    ya = np.asarray(Y_TR_C, dtype=np.float64)
+    _tr = np.asarray(ho_tr)
+    _va = np.asarray(ho_va)
+    _m, _it = lgb_fit(TR_X[_tr], ya[_tr], TR_X[_va], ya[_va], MODEL_SEEDS[0])
+    _p = np.clip(_m.predict(TR_X[_va], num_iteration=_it), 0, None)
+    _raw = sum(abs(Y_TR[ho_va[j]] - float(_p[j]))
+               for j in range(len(ho_va))) / len(ho_va)
+    print(f"\n  main model, time holdout MASE = {_raw:.4f}  "
+          f"(iter {_it})")
+    print(f"  main model, proxy MASE       = {OOF_PROXY if not Z_OK else mase(Y_TR, OOF_MAIN, PROXY_MASK):.4f}")
+    del _m
+    gc.collect()
+elif ho_va:
+    _mdl = fb_fit(TR_META, Y_TR_C,
+                  [r[M_FILM] not in HO_LATE for r in TR_META])
+    _raw = sum(abs(Y_TR[i] - fb_predict(_mdl, TR_META[i]))
+               for i in ho_va) / len(ho_va)
+    print(f"\n  fallback model, time holdout MASE = {_raw:.4f}")
+HOLDOUT_MASE = _raw if ho_va else float("nan")
+print("\n  Gate: a change that improves the proxy but worsens this number")
+print("  should not be submitted. Model Z failed exactly that test.")
 
 # %% [markdown]
 # ## 11. The diagnostics that actually matter

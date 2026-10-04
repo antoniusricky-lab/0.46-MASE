@@ -678,3 +678,75 @@ One small free win: for `101` the model scores 0.3672 while simply predicting
 4. Force `101` predictions toward zero (+0.0006, trivial).
 5. ~~Cross-film target-date features~~ — retracted, ceiling +0.008.
 6. ~~Dedicated `001` handling~~ — retracted, irreducible.
+
+---
+
+## Post-mortem 2: model Z, and why the proxy could not see it
+
+| build | proxy (calibrated) | leaderboard |
+|---|---|---|
+| no Z, quantile snap, film_curve, lags 0–12 | ~0.337 | **0.46795** |
+| + model Z | 0.3377 | 0.52220 *(no-guard variant)* |
+| + Z, capped snap, lags 0–24, stage-1 uplift | **0.3348** | **0.53421** |
+
+Model Z improved the proxy every single time and destroyed the leaderboard
+every single time. The last build had the **best proxy score of any build and
+the worst leaderboard score of any build** — a 5× divergence with the opposite
+sign.
+
+### It is not a threshold-transfer bug
+
+The obvious suspect was that `TP_EDGES` are absolute: decile boundaries are
+taken from the out-of-fold `p0` distribution and applied to test `p0`, so a
+shift in `p0` would push more rows into the zeroing deciles. That is the same
+class of bug as the absolute zero-snap fixed earlier.
+
+`analysis/z_shift.py` rules it out — rank-based deciles score the same as
+absolute edges (0.4002 vs 0.3999 on the time holdout).
+
+### What is actually wrong
+
+**Forcing exact zeros is one-sided.** A wrongly zeroed row loses the entire
+true ratio, so the downside is unbounded while the upside is capped at the
+prediction it replaced. Under a matched distribution that trade is optimal —
+it is the L1 median. Under the calendar shift between Apr–Sep train and
+Oct–Mar test it is reckless, and Z zeroes ~30% of all rows.
+
+The per-horizon quantile snap does something similar but far gentler: it is
+capped at the true zero share and it never trains a dedicated model to be
+confident about zeros.
+
+### The real process failure: no time-based validation
+
+The proxy is a **random** split over films. It measures "unseen film, same
+period". The leaderboard measures "unseen film, **later** period". Model Z
+exploits the first and fails the second, and a random split is structurally
+incapable of detecting that.
+
+The original 0.46641 notebook **had** this split — its cell 11, a time-based
+holdout on the latest films. This pipeline dropped it when I rewrote
+everything, and that single omission is what let two bad submissions through.
+
+Measured on the same data (`analysis/z_shift.py`):
+
+| split | main model | model Z |
+|---|---|---|
+| random film split | 0.4381 | 0.4427 |
+| **time holdout** | **0.3922** | **0.3999** |
+
+Z is worse on both, and clearly worse on the time holdout.
+
+### Changes
+
+* `RUN_Z = False`. Set it True only to reproduce the failure.
+* `MAX_Z_WEIGHT = 0.35` so the blend cannot hand Z everything if re-enabled.
+  The previous run let it reach 100%.
+* **New cell 10c: time-based holdout** — train on the earliest 75% of films by
+  release date, score the latest 25%. Treat it as a **gate**.
+
+### Rule going forward
+
+A change ships only if it improves **both** the proxy and the time holdout.
+Anything that improves the proxy alone is assumed to be exploiting the random
+split until the holdout agrees. Model Z failed exactly this test, and so would
+have been caught before costing two submissions.
