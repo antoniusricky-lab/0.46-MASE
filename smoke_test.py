@@ -87,6 +87,12 @@ test = pd.DataFrame(te_rows, columns=["movie_title", "cinema_ids", "city_name", 
 test.insert(0, "id", np.arange(1, len(test) + 1))
 test.to_csv(SMOKE / "test.csv", index=False)
 pd.DataFrame({"id": test.id, "total_ticket": 100.0}).to_csv(SMOKE / "sample_submission.csv", index=False)
+# a fake finished submission so CELL 7 has something to diagnose, with plenty of
+# exact zeros at the long horizons (the case that matters)
+_decay = np.array([0.9, 0.7, 0.5, 0.35, 0.2, 0.12, 0.08])
+_off = np.tile(np.arange(7), len(test) // 7 + 1)[:len(test)]
+_fake = np.floor(RNG.integers(0, 120, len(test)) * _decay[_off] + 0.5).astype(int)
+pd.DataFrame({"id": test.id, "total_ticket": _fake}).to_csv(SMOKE / "submission_v4.csv", index=False)
 
 # ------------------------------------------- reference tables (real calendar)
 shutil.copy("holidays.csv", SMOKE / "holidays.csv")

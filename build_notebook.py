@@ -538,6 +538,268 @@ lvl_th.to_pickle(CACHE_DIR / "level_test_history.pkl")
 print(f"\n[CELL 6] {time.time() - t0:.1f}s  (level tables cached)")
 """)
 
+# ====================================================================== CELL 7
+md(r"""
+## CELL 7 — diagnose an existing submission (needs `submission_v4.csv` next to the notebook)
+
+No model. This reads a finished submission back, converts it to the ratio space the metric
+actually scores, and shows exactly how wrong the Eid cohort's profile is.
+
+The thing I most want to see: **how many cohort rows are predicted exactly 0.** A multiplier
+(v4's `x1.6`) leaves a zero at zero, so if most of the cohort's late horizons are zeros then the
+Lebaran probe was structurally incapable of fixing them and we need a *floor*, not a scale.
+""")
+code(r"""
+# CELL 7 — DIAGNOSE AN EXISTING SUBMISSION
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+SUB_PATH = None          # set to "path/to/file.csv" to diagnose a specific submission
+
+_hol7 = (holidays.drop_duplicates("date")
+         .assign(holiday_tipe=lambda d: d.holiday_tipe.astype(str).str.strip().str.lower())
+         .set_index("date"))
+
+
+def regime(dates):
+    # Calendar facts per date. Reused by CELL 8.
+    d = pd.DatetimeIndex(pd.Series(np.asarray(dates)).to_numpy())
+    f = pd.DataFrame(index=np.arange(len(d)))
+    f["dow"] = d.dayofweek
+    f["holiday"] = (pd.Series(_hol7.holiday_tipe.reindex(d).to_numpy())
+                    .fillna("normal").eq("holiday").astype(int).to_numpy())
+    k46 = (d - EID_1446).days.to_numpy()
+    k47 = (d - EID_1447).days.to_numpy()
+    f["eid_k"] = np.where(np.abs(k46) <= 45, k46, np.where(np.abs(k47) <= 45, k47, np.nan))
+    f["ramadan"] = (((d >= RAMADAN_1447[0]) & (d <= RAMADAN_1447[1])) |
+                    ((d >= RAMADAN_1446[0]) & (d <= RAMADAN_1446[1]))).astype(int)
+    f["eid_week"] = ((f.eid_k >= 0) & (f.eid_k <= 6)).astype(int)
+    _s = np.zeros(len(d), dtype=int)
+    for a, b in SCHOOL_BREAKS:
+        _s = _s | ((d >= a) & (d <= b)).astype(int)
+    f["school"] = _s
+    f["label"] = np.where(f.eid_week == 1, "eid_week",
+                 np.where(f.ramadan == 1, "ramadan",
+                 np.where(f.school == 1, "school_break",
+                 np.where(f.holiday == 1, "holiday", "ordinary"))))
+    return f
+
+
+def hitung_skala(history):
+    total = history.groupby(["movie_title", "cinema_ids"]).total_ticket.sum()
+    return (total / 3).clip(lower=1).rename("scale")
+
+
+def find_sub(path=None):
+    cands = ([Path(path)] if path else
+             [SUB_DIR / "submission_v4.csv", Path("submission_v4.csv"),
+              DATA_DIR / "submission_v4.csv"])
+    for c in cands:
+        if c.exists():
+            return c
+    hits = sorted(Path(".").glob("submission*.csv")) + sorted(SUB_DIR.glob("submission*.csv"))
+    if hits:
+        return hits[0]
+    raise FileNotFoundError("put submission_v4.csv beside the notebook, or set SUB_PATH")
+
+
+_p = find_sub(SUB_PATH)
+sub = pd.read_csv(_p)
+print("diagnosing:", _p.resolve(), "|", sub.shape)
+assert sub.id.equals(test.id), "submission id order does not match test.csv"
+
+scale_off = hitung_skala(th)
+D = pd.DataFrame({"h": test.off.to_numpy(), "d1": test.d1.to_numpy(),
+                  "date": test.date_show.to_numpy(),
+                  "scale": test.join(scale_off, on=["movie_title", "cinema_ids"]).scale.to_numpy(),
+                  "pred": sub.total_ticket.to_numpy().astype(float)})
+D["ratio"] = D.pred / D.scale
+_rg = regime(D.date)
+D["label"], D["eid_k"] = _rg.label.to_numpy(), _rg.eid_k.to_numpy()
+_ap = CACHE_DIR / "test_pair_patterns.pkl"
+if _ap.exists():
+    D["pattern"] = test.join(pd.read_pickle(_ap).pattern,
+                             on=["movie_title", "cinema_ids"]).pattern.to_numpy()
+else:
+    D["pattern"] = "?"
+_zs = lambda v: float((v == 0).mean())
+
+# ------------------------------------------------------- S1 profile by horizon
+line("S1  predicted profile by horizon")
+print(D.groupby("h").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                         median_ratio=("ratio", "median"), zero_share=("pred", _zs),
+                         mean_tickets=("pred", "mean")).round(4).to_string())
+print(f"\noverall mean ratio {D.ratio.mean():.4f} | zero share {(D.pred == 0).mean():.2%}"
+      f" | total tickets {int(D.pred.sum()):,}")
+
+# ------------------------------------------------------- S2 profile by regime
+line("S2  predicted profile by target regime")
+print(D.groupby("label").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                             median_ratio=("ratio", "median"),
+                             zero_share=("pred", _zs)).round(4).to_string())
+
+# ----------------------------------------------------------- S3 the Eid cohort
+line("S3  THE EID COHORT (D1 = 2026-03-18)")
+coh = D[D.label == "eid_week"]
+print("cohort D1 dates:", sorted({str(x.date()) for x in coh.d1}))
+print(f"cohort rows {len(coh):,} ({len(coh) / len(D):.2%} of test) | pairs {len(coh) // 7}")
+print(coh.groupby("h").agg(eid_k=("eid_k", "first"), rows=("ratio", "size"),
+                           mean_ratio=("ratio", "mean"), median_ratio=("ratio", "median"),
+                           zero_share=("pred", _zs), mean_tickets=("pred", "mean"))
+      .round(4).to_string())
+print(f"\ncohort mean predicted ratio over D4-D10 : {coh.ratio.mean():.4f}")
+print(f"cohort rows predicted exactly 0         : {int((coh.pred == 0).sum()):,}"
+      f" ({(coh.pred == 0).mean():.2%})")
+print("\nMASE recoverable if the true cohort ratio is a flat r  (= sum|r - pred| / 72611):")
+for _r in (1.0, 1.25, 1.5, 2.0, 2.5):
+    print(f"   r = {_r:4.2f}  ->  {np.abs(_r - coh.ratio).sum() / len(D):.4f}")
+_z = coh[coh.pred == 0]
+print(f"\n...of which the {len(_z):,} rows currently predicted 0 alone account for:")
+for _r in (1.0, 1.5, 2.0):
+    print(f"   r = {_r:4.2f}  ->  {_r * len(_z) / len(D):.4f}")
+
+# -------------------------------------------- S4 why a multiplier cannot work
+line("S4  what a pure multiplier does to the cohort (v4 shipped x1.6)")
+for _m in (1.0, 1.6, 2.0, 3.0):
+    _p2 = np.floor(coh.ratio.to_numpy() * _m * coh.scale.to_numpy() + 0.5)
+    print(f"  x{_m:<4} -> cohort mean ratio {(_p2 / coh.scale.to_numpy()).mean():.4f}"
+          f" | zeros {(_p2 == 0).mean():.2%}")
+print("\nreading: zeros are fixed points of multiplication. Whatever share of the cohort is")
+print("already 0 cannot be moved by scaling, so the x1.6 probe could never reach a ratio > 1.")
+
+# ------------------------------------------------ S5/S6 leverage concentration
+line("S5  by D1-D3 activity pattern")
+print(D.groupby("pattern").agg(rows=("ratio", "size"), med_scale=("scale", "median"),
+                               mean_ratio=("ratio", "mean"),
+                               zero_share=("pred", _zs)).round(4).to_string())
+line("S6  by scale bucket, with the share of the metric each bucket controls")
+D["sb"] = pd.cut(D.scale, [0, 2, 5, 10, 25, 50, 100, 1e9],
+                 labels=["<=2", "<=5", "<=10", "<=25", "<=50", "<=100", ">100"])
+_g6 = D.groupby("sb", observed=False).agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                                          zero_share=("pred", _zs),
+                                          lev=("scale", lambda v: float((1.0 / v).sum())))
+_g6["leverage_share"] = _g6.lev / float((1.0 / D.scale).sum())
+print(_g6.drop(columns="lev").round(4).to_string())
+D.to_pickle(CACHE_DIR / "sub_diag.pkl")
+print(f"\n[CELL 7] {time.time() - t0:.1f}s")
+""")
+
+# ====================================================================== CELL 8
+md(r"""
+## CELL 8 — the market-level index and the per-row market ratio (needs CELL 7)
+
+Builds one number per calendar date: a **day-of-week-adjusted market level** `L(date)`, measured
+from `test_history.csv` (every row there is a D1-D3 row, so film age is already controlled) and
+normalised against a normal reference window. Because the day-of-week effect is divided out, the
+model's existing weekday features are not double-counted.
+
+Then, per test row:
+
+```
+market_ratio = L(target day) / mean( L(D1), L(D2), L(D3) )
+```
+
+For ordinary-to-ordinary rows this should land near 1.0 — that is the sanity check. It departs
+from 1 exactly where the window straddles a regime boundary, which is the 13.34% of rows that
+CELL 5 flagged. Idulfitri week 2026 is unobserved, so those seven days are filled from the
+Idulfitri 1446 H profile in `train.csv`.
+""")
+code(r"""
+# CELL 8 — MARKET-LEVEL INDEX + PER-ROW MARKET RATIO
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+# ---------------------------------- daily dow-adjusted level from test_history
+_g = th.groupby("date_show").agg(tickets=("total_ticket", "sum"), shows=("total_show", "sum"),
+                                 occ=("occupation_rate", "mean"), films=("movie_title", "nunique"),
+                                 rows=("total_ticket", "size"))
+_g["tps"] = _g.tickets / _g.shows.replace(0, np.nan)
+_ref = _g[(_g.index >= REF_2026[0]) & (_g.index <= REF_2026[1])]
+_base = _ref.groupby(_ref.index.dayofweek).tps.median()
+_g["f"] = _g.tps / _g.index.dayofweek.map(_base).to_numpy()
+print(f"reference window {REF_2026[0].date()} .. {REF_2026[1].date()}"
+      f" | observed dates {len(_g)} | median f {_g.f.median():.3f}")
+
+# weekly smoothing: full coverage and far less noise (dow is already divided out)
+_wk = (_g.assign(w=_g.index.to_period("W")).groupby("w")
+       .agg(days=("f", "size"), f=("f", "mean"), films=("films", "sum")))
+print("\nweekly market level (f = multiple of a normal same-weekday level):")
+print(_wk.round(3).to_string())
+
+# ------------------------------------------- assemble L(date) over every date
+_all = pd.date_range(min(test.d1.min(), th.date_show.min()), test.date_show.max())
+_wmap = {p: v for p, v in _wk.f.items()}
+L = pd.Series([_wmap.get(p, np.nan) for p in pd.PeriodIndex(_all, freq="W")],
+              index=_all, dtype=float, name="L")
+
+# Idulfitri 1447 H week is unobserved -> borrow the 1446 H profile from train.csv
+_ltr = pd.read_pickle(CACHE_DIR / "level_train.pkl")
+_prof = _ltr[_ltr.eid_k.between(1, 6)].set_index("eid_k").f_tps
+_prof = _prof[~_prof.index.duplicated()].reindex(range(1, 7)).interpolate().bfill().ffill()
+if _prof.isna().all():
+    print("*** WARNING: no Idulfitri 1446 H profile in train.csv - falling back to 1.0 ***")
+    _prof = pd.Series(1.0, index=range(1, 7))
+_vals = [float(_prof.loc[1])] + [float(_prof.loc[k]) for k in range(1, 7)]   # k=0 copies k=1
+for _k, _v in enumerate(_vals):
+    L.loc[EID_1447 + pd.Timedelta(days=_k)] = _v
+print(f"\nEid week fill (from Apr 2025): " +
+      " ".join(f"k{_k}={_v:.2f}" for _k, _v in enumerate(_vals)))
+print("CAVEAT: k0 (2026-03-21, the cohort's D4) is a copy of k1 - train.csv starts at Eid+1.")
+_miss = int(L.isna().sum())
+L = L.interpolate().bfill().ffill()
+print(f"dates with no observed week, filled by interpolation: {_miss}")
+print("L coverage over all needed dates:", f"{L.notna().mean():.1%}")
+
+
+def Lof(dates):
+    return L.reindex(pd.DatetimeIndex(pd.Series(np.asarray(dates)).to_numpy())).to_numpy()
+
+
+_num = Lof(test.date_show)
+_den = sum(Lof(test.d1 + pd.Timedelta(days=k)) for k in range(3)) / 3.0
+M = pd.DataFrame({"h": test.off.to_numpy(), "d1": test.d1.to_numpy(),
+                  "label": regime(test.date_show).label.to_numpy(),
+                  "hist": regime(test.d1).label.to_numpy(),
+                  "L_t": _num, "L_h": _den})
+M["mr"] = M.L_t / M.L_h
+
+# ------------------------------------------------------- sanity + distribution
+line("M1  sanity: ordinary -> ordinary rows must sit near mr = 1.0")
+_ord = M[(M.label == "ordinary") & (M.hist == "ordinary")]
+print(f"rows {len(_ord):,} | mean mr {_ord.mr.mean():.3f} | median {_ord.mr.median():.3f}"
+      f" | 10-90% {_ord.mr.quantile(.1):.3f}-{_ord.mr.quantile(.9):.3f}")
+print("if this is far from 1.0 the index is biased and the correction must not be trusted.")
+
+line("M2  market ratio by target regime")
+print(M.groupby("label").mr.describe(percentiles=[.1, .5, .9]).round(3).to_string())
+line("M3  market ratio by (D1-D3 regime -> target regime), the straddle cells")
+_pv = M.pivot_table(index="hist", columns="label", values="mr", aggfunc="median")
+_cn = M.pivot_table(index="hist", columns="label", values="mr", aggfunc="size")
+print("median mr:");  print(_pv.round(3).to_string())
+print("\nrows:");     print(_cn.fillna(0).astype(int).to_string())
+
+line("M4  the Eid cohort's implied market ratio by horizon")
+_c = M[M.label == "eid_week"]
+print(_c.groupby("h").agg(rows=("mr", "size"), L_target=("L_t", "first"),
+                          L_hist=("L_h", "first"), mr=("mr", "first")).round(3).to_string())
+print("\nthis is the MARKET term only. The ratio to predict is roughly")
+print("   normal_decay(h, D1-dow) x mr,  and separately the drop-out hazard collapses during")
+print("   Eid week, so the zero share should be near zero rather than rising with h.")
+
+line("M5  how many rows a correction would touch")
+for _grp in (["ramadan", "eid_week"], ["ramadan", "eid_week", "school_break"]):
+    _m = M.label.isin(_grp).to_numpy()
+    print(f"  target in {str(_grp):46s} rows {int(_m.sum()):6,} ({_m.mean():6.2%})"
+          f" | median mr {np.nanmedian(M.mr.to_numpy()[_m]):.3f}")
+print(f"  rows with a missing market ratio                       {int(M.mr.isna().sum()):6,}")
+_far = (M.mr > 1.5) | (M.mr < 0.67)
+print(f"  rows whose market ratio is beyond x1.5 / x0.67        {int(_far.sum()):6,}"
+      f" ({_far.mean():6.2%})")
+M.to_pickle(CACHE_DIR / "market_ratio.pkl")
+L.to_pickle(CACHE_DIR / "market_level.pkl")
+print(f"\n[CELL 8] {time.time() - t0:.1f}s  (market ratio cached)")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
@@ -560,6 +822,45 @@ md(r"""
 The CV-to-LB gap **grew** from 0.033 (v1) to 0.078 (v3) as CV improved. That is the signature of
 optimising a population that is not the scored population, not of a weak model. The leader at
 0.34456 is roughly where our *CV* already sits.
+
+### Round 1 measurements
+
+Environment: 16 cores, **11.7 GiB RAM but only 0.1 GiB free**, Python 3.12.5, pandas 3.0.6,
+lightgbm 4.7.0. catboost / pyarrow / tqdm absent. `cinema_forecasting_v3.py` absent, so **v4
+still cannot be re-run**. v4 == the `0.43715.py` script, LB **0.43715**.
+
+Both structural rules re-verified in pandas. `R1` exact: active-on-D3 == in test.csv, and 0 test
+pairs lack D1-D3 history. `R2`: 160 films, 67 distinct D1 dates, Wed 40% / Thu 41% / Fri 15%.
+
+**The metric is controlled by a handful of small pairs.** Share of rows vs share of total
+`1/scale` leverage: scale<=2 is 0.24% of rows but **6.6%** of leverage; <=5 is 1.54% / **20.1%**;
+<=10 is 4.97% / **37.2%**; <=25 is 17.04% / **64.6%**; <=50 is 32.78% / **81.2%**. Official scale
+median 91.67, 1st percentile 4.0, max 24,117. By D1-D3 pattern, `001`+`011`+`101` are 8.9% of
+rows but **24.6% of leverage** (median scale 15 / 53 / 25, vs 99 for `111`).
+
+**Calendar composition of the 72,611 scored rows:** ordinary 68.39%, Ramadan 17.09%, school break
+7.21%, Eid week 6.08%, other holiday 1.22%. **Straddle rows (target regime absent from the
+window's own D1-D3): 9,683 = 13.34%** — Eid 4,417 + ordinary 1,627 + Ramadan 1,460 + school 1,290
++ holiday 889. Every Eid-week row comes from a Ramadan D1-D3.
+
+**The two market factors, measured** (day-of-week-adjusted, so a weekday effect is already
+divided out):
+
+| period | source | level vs normal |
+|---|---|---|
+| Idulfitri 1446 H, Eid+1..+6 (Apr 2025) | `train.csv` | **2.41x** tps / 2.52x occ |
+| Ramadan 1447 H weeks 1 / 2 / 3 / 4 / 5 | `test_history.csv` | 0.44 / 0.41 / **0.29** / 0.64 / 0.92 |
+| 2026-03-18..20 (the cohort's own D1-D3) | `test_history.csv` | 1.17x |
+
+Implied **market multiplier for the Eid cohort: 1.52x (D10) to 2.41x (D5)**, mean ~2.05 on
+tickets-per-show, ~2.3 on occupancy. Eid+0 (the cohort's D4) has no analogue at all, because
+`train.csv` begins at Eid+1.
+
+**Cross-film coverage of our target days** (another film's D1-D3 observed that date): 66.19% by
+date, 58.38% at exact cluster+date — matching PR #1 exactly. By regime this splits the calendar
+problem in two: Ramadan **72.8%** covered, holiday 100%, school break 53.8%, but Eid week
+**0.0%**, because `test_history.csv` stops on 2026-03-20. Ramadan is measurable from 2026 data;
+Eid week is pure extrapolation from April 2025.
 
 ### Already proven, do not re-measure (PR #1 `FINDINGS.md`)
 
