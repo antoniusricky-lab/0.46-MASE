@@ -759,13 +759,17 @@ _num = Lof(test.date_show)
 _den = sum(Lof(test.d1 + pd.Timedelta(days=k)) for k in range(3)) / 3.0
 M = pd.DataFrame({"h": test.off.to_numpy(), "d1": test.d1.to_numpy(),
                   "label": regime(test.date_show).label.to_numpy(),
-                  "hist": regime(test.d1).label.to_numpy(),
+                  "hist_label": regime(test.d1).label.to_numpy(),
                   "L_t": _num, "L_h": _den})
 M["mr"] = M.L_t / M.L_h
+# NOTE: the column is `hist_label`, never `hist` -- `df.hist` is the pandas histogram
+# METHOD, so `M.hist == "ordinary"` silently compares a bound method and returns all-False.
+# That bug made M1 print "rows 0 | mean mr nan" in the previous run.
 
 # ------------------------------------------------------- sanity + distribution
 line("M1  sanity: ordinary -> ordinary rows must sit near mr = 1.0")
-_ord = M[(M.label == "ordinary") & (M.hist == "ordinary")]
+_ord = M[(M["label"] == "ordinary") & (M["hist_label"] == "ordinary")]
+assert len(_ord) > 0, "M1 cohort is empty -- selection bug, do not trust the index"
 print(f"rows {len(_ord):,} | mean mr {_ord.mr.mean():.3f} | median {_ord.mr.median():.3f}"
       f" | 10-90% {_ord.mr.quantile(.1):.3f}-{_ord.mr.quantile(.9):.3f}")
 print("if this is far from 1.0 the index is biased and the correction must not be trusted.")
@@ -773,8 +777,8 @@ print("if this is far from 1.0 the index is biased and the correction must not b
 line("M2  market ratio by target regime")
 print(M.groupby("label").mr.describe(percentiles=[.1, .5, .9]).round(3).to_string())
 line("M3  market ratio by (D1-D3 regime -> target regime), the straddle cells")
-_pv = M.pivot_table(index="hist", columns="label", values="mr", aggfunc="median")
-_cn = M.pivot_table(index="hist", columns="label", values="mr", aggfunc="size")
+_pv = M.pivot_table(index="hist_label", columns="label", values="mr", aggfunc="median")
+_cn = M.pivot_table(index="hist_label", columns="label", values="mr", aggfunc="size")
 print("median mr:");  print(_pv.round(3).to_string())
 print("\nrows:");     print(_cn.fillna(0).astype(int).to_string())
 
@@ -800,6 +804,184 @@ L.to_pickle(CACHE_DIR / "market_level.pkl")
 print(f"\n[CELL 8] {time.time() - t0:.1f}s  (market ratio cached)")
 """)
 
+md(r"""
+## CELL 9 — the honest target shape: release-anchored ratio profile from `train.csv`
+
+Mined from `0.46641.ipynb`'s stored outputs, v1's own error anatomy says the error is concentrated
+in **opening-phase windows (MASE 0.9000, 25.9% of estimated error)**, while scale is a weak and
+non-monotone driver. And R2 already proved the test is ~100% opening windows: D1 *is* the
+wide-release date.
+
+So the population that matters is "window anchored at the wide release". v1 trained mostly on
+mid-run windows, and its `buka (0-2)` bucket is polluted by sneak previews (D1-D3 = a 1-4 cinema
+preview, D4-D10 = the wide release exploding) — the opposite shape to the test.
+
+This cell measures the **true** `y / scale` profile on release-anchored train windows built to the
+test's exact geometry, so it is directly comparable to CELL 7's predicted profile. No model
+training. Guards applied:
+
+- wide release detected by cluster count, so preview days are skipped;
+- `d1 + 9 <= 2025-09-30` so no horizon is right-censored into a false zero;
+- the film's first appearance must be after the start of `train.csv` (no left-censoring);
+- windows overlapping the corrupted 2025-06-01..06-16 span are dropped;
+- only pairs **active on D3** are kept (R1: that is exactly the test's inclusion rule);
+- absent future dates are filled with 0, which is what "zero" means in this data;
+- `ordinary`-only variant isolates normal decay from the calendar effects of CELL 8;
+- the profile is reweighted to the test's D1-weekday mix, because R2 showed D1-dow dominates.
+""")
+code(r"""
+# CELL 9 — RELEASE-ANCHORED TRUE RATIO PROFILE (no model training)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+MIN_CLUSTERS, WIDE_FRAC = 5, 0.50
+TR_MAX = train.date_show.max()
+
+
+def regime(dates):
+    d = pd.DatetimeIndex(dates)
+    lab = np.full(len(d), "ordinary", dtype=object)
+    for a, b in SCHOOL_BREAKS:
+        lab[(d >= a) & (d <= b)] = "school_break"
+    for a, b in (RAMADAN_1446, RAMADAN_1447):
+        lab[(d >= a) & (d <= b)] = "ramadan"
+    for e in (EID_1446, EID_1447):
+        lab[(d >= e) & (d <= e + pd.Timedelta(days=6))] = "eid_week"
+    return pd.Series(lab, index=range(len(d)))
+
+
+# ------------------------------------------------- 1. preview-corrected release date
+_dc = train.groupby(["movie_title", "date_show"], as_index=False).agg(
+    clusters=("cinema_ids", "nunique"), tickets=("total_ticket", "sum"))
+_mx = _dc.groupby("movie_title").clusters.max().rename("mx")
+_dc = _dc.merge(_mx, on="movie_title")
+_wide = _dc[(_dc.clusters >= np.maximum(MIN_CLUSTERS, WIDE_FRAC * _dc.mx))]
+rel = _wide.groupby("movie_title").date_show.min().rename("d1").reset_index()
+_first = train.groupby("movie_title").date_show.min().rename("first")
+rel = rel.merge(_first, on="movie_title")
+rel["preview_days"] = (rel.d1 - rel["first"]).dt.days
+print(f"films in train {train.movie_title.nunique()} | wide release detected {len(rel)}")
+print(f"films whose wide release is LATER than first appearance (sneak preview): "
+      f"{int((rel.preview_days > 0).sum())} ({(rel.preview_days > 0).mean():.1%})")
+print("preview-day distribution:",
+      rel.preview_days.value_counts().sort_index().head(12).to_dict())
+
+# ------------------------------------------------------------- 2. eligibility guards
+_ok = rel[(rel.d1 + pd.Timedelta(days=9) <= TR_MAX) & (rel["first"] > train.date_show.min())].copy()
+_bad = (_ok.d1 + pd.Timedelta(days=9) >= BAD_START) & (_ok.d1 <= BAD_END)
+_ok = _ok[~_bad]
+print(f"\neligible films: {len(_ok)}  (fully observed D1-D10, release inside train, "
+      f"not touching {BAD_START.date()}..{BAD_END.date()})")
+_need = 20 if len(train) > 100_000 else 3      # real train.csv vs a synthetic smoke fixture
+assert len(_ok) >= _need, (f"only {len(_ok)} eligible films - loosen the guards or check the "
+                           f"release detector before trusting this profile")
+
+# ------------------------------------------------- 3. build windows to test geometry
+w = train.merge(_ok[["movie_title", "d1"]], on="movie_title", how="inner")
+w["off"] = (w.date_show - w.d1).dt.days + 1
+w = w[(w.off >= 1) & (w.off <= 10)]
+h3 = w[w.off <= 3]
+piv = (h3.pivot_table(index=["movie_title", "cinema_ids"], columns="off",
+                      values="total_ticket", aggfunc="sum")
+       .reindex(columns=[1, 2, 3]))
+piv.columns = ["s1", "s2", "s3"]
+piv = piv.fillna(0.0).reset_index()
+piv = piv[piv.s3 > 0].copy()                      # R1: test contains only pairs active on D3
+piv["scale"] = ((piv.s1 + piv.s2 + piv.s3) / 3.0).clip(lower=1.0)
+print(f"\nrelease-anchored pairs active on D3: {len(piv):,}")
+
+piv = piv.merge(_ok[["movie_title", "d1"]], on="movie_title", how="left")
+assert piv.d1.notna().all(), "a release-anchored pair lost its d1 in the merge"
+grid = piv[["movie_title", "cinema_ids", "d1", "scale"]].merge(
+    pd.DataFrame({"off": np.arange(4, 11)}), how="cross")
+grid["date_show"] = grid.d1 + pd.to_timedelta(grid.off - 1, unit="D")
+_fut = (w[w.off >= 4].groupby(["movie_title", "cinema_ids", "off"], as_index=False)
+        .total_ticket.sum())
+grid = grid.merge(_fut, on=["movie_title", "cinema_ids", "off"], how="left")
+grid["total_ticket"] = grid.total_ticket.fillna(0.0)
+grid["ratio"] = grid.total_ticket / grid.scale
+grid["d1_dow"] = grid.d1.dt.dayofweek
+grid["lab"] = regime(grid.date_show).to_numpy()
+grid["lab_d1"] = regime(grid.d1).to_numpy()
+print(f"scored rows built: {len(grid):,}  (pairs x 7 horizons)")
+
+# --------------------------------------------------------------- 4. the true profile
+line("T1  TRUE ratio profile by horizon (release-anchored, all calendar days)")
+_t1 = grid.groupby("off").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                              median_ratio=("ratio", "median"),
+                              zero_share=("total_ticket", lambda s: float((s == 0).mean())))
+print(_t1.round(4).to_string())
+
+line("T2  TRUE profile on ORDINARY days only (D1 and target both ordinary)")
+_pure = grid[(grid.lab == "ordinary") & (grid.lab_d1 == "ordinary")]
+_t2 = _pure.groupby("off").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                               median_ratio=("ratio", "median"),
+                               zero_share=("total_ticket", lambda s: float((s == 0).mean())))
+print(_t2.round(4).to_string())
+print(f"ordinary-only rows: {len(_pure):,} of {len(grid):,} ({len(_pure) / len(grid):.1%})")
+
+line("T3  TRUE profile by D1 weekday (ordinary days) - R2 said this dominates")
+_t3 = _pure.pivot_table(index="d1_dow", columns="off", values="ratio", aggfunc="mean")
+_n3 = _pure.pivot_table(index="d1_dow", columns="off", values="ratio", aggfunc="size")
+_DOW = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+print("mean ratio:");  print(_t3.rename(index=_DOW).round(3).to_string())
+print("\nrows:");      print(_n3.rename(index=_DOW).fillna(0).astype(int).to_string())
+
+# ------------------------- 5. reweight to the test's D1-dow mix, then face the model
+line("T4  TRUE profile reweighted to the test's D1-weekday mix  vs  v4's PREDICTED profile")
+_td = (test.drop_duplicates("movie_title").d1.dt.dayofweek.value_counts(normalize=True)
+       .rename("w_test"))
+print("test D1-dow mix:", {_DOW[k]: round(v, 3) for k, v in _td.sort_index().items()})
+_pz = _pure.pivot_table(index="d1_dow", columns="off", values="total_ticket",
+                        aggfunc=lambda s: float((s == 0).mean()))
+_w = _td.reindex(_t3.index).fillna(0.0)
+_cover = float(_w.sum())
+_w = _w / _cover if _cover > 0 else _w
+
+
+def _wmean(tab, wts):
+    # weighted mean down the dow axis, renormalised per column over non-missing cells
+    num = (tab.mul(wts, axis=0)).sum(skipna=True)
+    den = (tab.notna().mul(wts, axis=0)).sum()
+    return num / den.replace(0, np.nan)
+
+
+true_mean = _wmean(_t3, _w)
+true_zero = _wmean(_pz, _w)
+print(f"\n(these weights cover {_cover:.1%} of test films; a D1-dow that never occurs in the"
+      f" eligible train films is dropped and the rest renormalised)")
+
+_sp = CACHE_DIR / "sub_diag.pkl"
+if _sp.exists():
+    D = pd.read_pickle(_sp)
+    _po = D[D.label == "ordinary"] if "label" in D.columns else D
+    pred = _po.groupby("h").agg(pred_mean=("ratio", "mean"),
+                                pred_zero=("pred", lambda s: float((s == 0).mean())))
+    cmp = pd.DataFrame({"true_mean": true_mean, "pred_mean": pred.pred_mean,
+                        "true_zero": true_zero, "pred_zero": pred.pred_zero})
+    cmp["mean_mult"] = cmp.true_mean / cmp.pred_mean
+    cmp["zero_gap_pp"] = (cmp.true_zero - cmp.pred_zero) * 100
+    print(cmp.round(4).to_string())
+    print("\nmean_mult > 1 => v4 UNDER-predicts that horizon; < 1 => it OVER-predicts.")
+    print("zero_gap_pp > 0 => v4 emits too FEW zeros at that horizon.")
+    print("CAVEAT: a mean-matching multiplier is not MAE-optimal (the median is). This table")
+    print("        sizes the bias; it is not yet the correction.")
+else:
+    print("cache/sub_diag.pkl missing - run CELL 7 first to get the predicted profile.")
+    print("true (reweighted) mean ratio by horizon:", true_mean.round(4).to_dict())
+    print("true (reweighted) zero share by horizon:", true_zero.round(4).to_dict())
+
+line("T5  how much of the test population this profile actually speaks for")
+print(f"eligible train films {len(_ok)} vs test films {test.movie_title.nunique()}")
+print("pure-ordinary share of the TRAIN profile rows:", f"{len(_pure) / len(grid):.1%}")
+_rl = np.load(CACHE_DIR / "test_regime_label.npy", allow_pickle=True)
+print("ordinary share of TEST rows:", f"{float((_rl == 'ordinary').mean()):.1%}")
+print("=> the remaining test rows need the CELL 8 market ratio on top of this shape.")
+grid.to_pickle(CACHE_DIR / "release_anchored_grid.pkl")
+_t1.to_pickle(CACHE_DIR / "true_profile_all.pkl")
+_t2.to_pickle(CACHE_DIR / "true_profile_ordinary.pkl")
+print(f"\n[CELL 9] {time.time() - t0:.1f}s  (release-anchored grid cached)")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
@@ -811,6 +993,67 @@ md(r"""
 | v3 | dropped corrupted Jun 1-16; removed month/day-of-month; mid-run windows (545k rows); extra calendar facts; hidden-date CV; Lebaran x1.6 probe; round half up | 0.359 | - | 0.43715 | kept |
 | v4 | competition features (4); Lebaran competition imputation; 127 leaves / min 100; 5 seeds | 0.344 | 0.354 | *(need from you)* | pending |
 | v5 | *(this notebook)* | | | | |
+
+### ROUND 2 — Phase 1 error anatomy, recovered for free from `0.46641.ipynb`
+
+The v1 notebook still carries its **stored outputs**, and it is not merely the 0.46641 baseline:
+it is a complete pipeline that already ran the two-part model, per-horizon calibration,
+regime-weighted MASE, adversarial validation and a blend. So Phase 1 needed no compute.
+
+**v1's own OOF error anatomy** (`r` = film-age bucket from `anchor_lag`, not calendar):
+
+| regime | MASE | n | est. test share | error contribution |
+|--------|------|---|-----------------|--------------------|
+| buka (0-2)    | **0.9000** | 96,649 | 13.7% | 25.9% |
+| awal (3-5)    | 0.5861 | 115,913 | 14.1% | 17.3% |
+| tengah (6-15) | 0.3755 | 496,671 | 43.7% | 34.4% |
+| akhir (16+)   | 0.3742 | 255,360 | 28.6% | 22.4% |
+
+- Reweighted 4-regime estimate **0.4766** (plain OOF 0.4530, time holdout 0.4133).
+- After the two-part model + calibration: OOF 0.4328, **estimate 0.4566**, holdout 0.3978.
+  Actual v1 LB was **0.46641** — so the reweighted estimator was accurate to 0.010 and the
+  CV→LB "gap" is not a mystery, it is the known age-composition reweighting.
+- **Adversarial AUC = 0.9997 (0.9999 without identity features).** Train and test are almost
+  perfectly separable. This is the quantitative proof of the population mismatch.
+- **True zero share = 43.5%** (confirms the ~40% figure). v1's zero classifier reached AUC
+  0.9339 and its optimal decile multipliers were `{0:1.05, 1:1.0, 2:1.0, 3:0.9, 4:0.7, 5:0.4,
+  6-9: 0.0}` — i.e. zero out the top 40% by `p0`. That emitted 38.7% zeros (41.53% after
+  blending) and moved plain OOF 0.4530 → 0.4359.
+- **Per-horizon calibration is already spent**: the fitted multipliers were `{4:1.01 … 10:1.00}`,
+  and blend+calibration+two-part together bought only −0.0074 on the weighted objective. The
+  friend's quoted +0.012 is therefore *not* additional headroom for us.
+- **MASE by (age × scale) is non-monotone**, so the Σ(1/scale) "leverage" framing from round 1
+  overstated small-scale rows. Mid-scale *opening* rows are the worst cells (10-25 → 1.304,
+  25-50 → 1.555), while `>50` is the best (0.650) within the same bucket:
+
+| regime | ≤2 | 2-5 | 5-10 | 10-25 | 25-50 | >50 |
+|--------|----|-----|------|-------|-------|-----|
+| buka (0-2)    | 0.533 | 0.672 | 0.995 | 1.304 | 1.555 | 0.650 |
+| awal (3-5)    | 0.587 | 0.335 | 0.640 | 0.740 | 0.962 | 0.492 |
+| tengah (6-15) | 0.544 | 0.401 | 0.586 | 0.401 | 0.540 | 0.339 |
+| akhir (16+)   | 1.572 | 0.740 | 0.457 | 0.456 | 0.413 | 0.319 |
+
+**Consequence — the round-1 Eid thesis is dead and the ranking changes.** CELL 7 showed v4
+already predicts the Eid cohort at mean ratio 1.0943 with **0.00% zeros**, so the ×1.6 hypothesis
+was already applied; the whole cohort is worth at most 0.0255 (at true r=1.5) and 0.0058 if v4 is
+already right. The dominant, *measurable* error source is the **opening-window population**, and
+R2 proved the test is ~100% opening windows while v1's `buka` bucket is polluted by sneak
+previews (D1-D3 = tiny preview, D4-D10 = wide release exploding — the inverse of the test shape).
+That also explains why "restrict training to lag-0 windows" was recorded as a negative result:
+with a corrupted `anchor_lag`, lag-0 selected *previews*, not releases. CELL 9 measures the true
+release-anchored shape with preview-corrected detection.
+
+**v1's pipeline is extractable** — `build_train_samples(hist_all, anchors, ...)` takes an explicit
+anchor set, so the missing `cinema_forecasting_v3.py` is no longer a hard blocker for retraining
+or for building an honest, release-anchored validation split.
+
+### Bug fixed this round
+
+`M.hist` resolved to the pandas `DataFrame.hist` *method*, so `M.hist == "ordinary"` compared a
+bound method and matched nothing — CELL 8's M1 sanity check printed `rows 0 | mean mr nan`. The
+column is now `hist_label`, access is `M["hist_label"]`, M1 asserts non-empty, and
+`build_notebook.py` fails the build if any generated cell accesses a column attribute-style when
+that name collides with the pandas API.
 
 ### The headline problem: CV gains are not transferring
 
@@ -902,6 +1145,33 @@ nb = {"cells": cells,
       "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
                    "language_info": {"name": "python", "version": "3.11"}},
       "nbformat": 4, "nbformat_minor": 5}
+
+# --------------------------------------------------------------------- guard rail
+# `M.hist` silently resolved to DataFrame.hist (the plotting method) and made a whole
+# sanity check return 0 rows. Fail the build if any generated cell accesses a column
+# attribute-style when that name collides with the pandas API.
+def _audit(cells):
+    import re
+    try:
+        import pandas as _pd
+    except ImportError:
+        print("audit skipped: pandas unavailable"); return
+    api = set(dir(_pd.DataFrame)) | set(dir(_pd.Series))
+    src = "\n".join("".join(c["source"]) for c in cells if c["cell_type"] == "code")
+    assigned = set(re.findall(r'\[\s*"([a-zA-Z_]\w*)"\s*\]\s*=', src))
+    assigned |= set(re.findall(r'^\s*"([a-zA-Z_]\w*)"\s*:', src, re.M))
+    bad = []
+    for col in sorted(assigned & api):
+        for obj in set(re.findall(r'\b([A-Za-z_]\w*)\.' + col + r'\b(?!\s*\()', src)):
+            bad.append(f"{obj}.{col}")
+    if bad:
+        raise SystemExit("AUDIT FAIL - attribute access collides with pandas API: "
+                         + ", ".join(sorted(set(bad)))
+                         + "\n  use df[\"col\"] instead, or rename the column.")
+    print(f"audit ok: {len(assigned)} column names, none shadowed by attribute access")
+
+
+_audit(cells)
 
 with open(NB, "w") as f:
     json.dump(nb, f, indent=1)
