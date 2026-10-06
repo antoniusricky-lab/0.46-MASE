@@ -982,6 +982,123 @@ _t2.to_pickle(CACHE_DIR / "true_profile_ordinary.pkl")
 print(f"\n[CELL 9] {time.time() - t0:.1f}s  (release-anchored grid cached)")
 """)
 
+md(r"""
+## CELL 10 — is post-processing closed? the MAE-correct version of T4
+
+T4 compared **means**. MASE is L1, so the optimal point forecast is the conditional **median**,
+and a mean-matching multiplier pushes predictions *above* the median on a right-skewed
+distribution. That is precisely the documented `+0.0163` regression in build 1 ("far horizons
+shipped at the mean, not the median"). So T4's `mean_mult` of 1.26 at D4 and 1.45 at D5 is **not**
+evidence of a 26-45% under-prediction — it is mostly skew.
+
+This cell redoes it properly, per `(horizon x D1-weekday)` cell on ordinary rows:
+
+1. **Quantile comparison** — true vs predicted q25/q50/q75. Assumption-light: if v4 is
+   distributionally calibrated the medians agree, and any gap at the median is the real bias.
+2. **MAE-optimal multiplier** — for each cell, scan `m` and evaluate the true expected MAE of
+   `m x pred` against the empirical true ratio distribution, via sorted prefix sums so it is
+   exact rather than sampled.
+
+The scan's assumption is stated explicitly because it matters: it treats the true ratio as
+**independent of v4's prediction within a cell**, i.e. it credits v4 with no within-cell
+discrimination. That makes the *level* correction it finds trustworthy and the *gain* it reports
+an over-estimate. Read the sign and the size, not the decimal.
+
+Everything here is measured on Apr-Sep 2025 films and applied to an Oct-Mar test, which is the
+exact time shift that made model Z lose 0.065 on the leaderboard. Treat a positive result as a
+hypothesis needing one probe, not as a win.
+""")
+code(r"""
+# CELL 10 — MAE-OPTIMAL PER-HORIZON LEVEL CHECK (medians, not means)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+_DOW = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+
+G = pd.read_pickle(CACHE_DIR / "release_anchored_grid.pkl")
+D = pd.read_pickle(CACHE_DIR / "sub_diag.pkl")
+# real data gives ~1000-3200 true rows per (horizon x dow); a synthetic fixture gives single digits
+MIN_TRUE = MIN_PRED = 150 if len(G) > 10_000 else 5
+D["d1_dow"] = pd.DatetimeIndex(D.d1).dayofweek
+Gp = G[(G.lab == "ordinary") & (G.lab_d1 == "ordinary")]
+Dp = D[D.label == "ordinary"]
+print(f"true grid (ordinary) {len(Gp):,} rows | v4 preds (ordinary) {len(Dp):,} rows")
+
+
+def mad_to(c, ys, cs):
+    # exact mean |y - c| for every c against sorted ys with prefix sums cs
+    c = np.asarray(c, dtype=float)
+    k = np.searchsorted(ys, c)
+    left = k * c - cs[k]
+    right = (cs[-1] - cs[k]) - (len(ys) - k) * c
+    return (left + right) / len(ys)
+
+
+line("Q1  true vs predicted quantiles per (horizon x D1-dow), ordinary rows")
+rows, grid_m = [], np.round(np.arange(0.40, 2.01, 0.02), 2)
+_i1 = int(np.where(grid_m == 1.0)[0][0])
+_drop = 0
+for (h, dw), gt in Gp.groupby(["off", "d1_dow"]):
+    pr = Dp[(Dp.h == h) & (Dp.d1_dow == dw)]
+    y = gt.ratio.to_numpy(dtype=float)
+    p = pr.ratio.to_numpy(dtype=float)
+    y, p = y[np.isfinite(y)], p[np.isfinite(p)]      # a NaN scale must not poison a whole cell
+    _drop += int((~np.isfinite(gt.ratio.to_numpy(dtype=float))).sum())
+    if len(y) < MIN_TRUE or len(p) < MIN_PRED:
+        continue
+    y = np.sort(y)
+    cs = np.concatenate([[0.0], np.cumsum(y)])
+    curve = np.array([mad_to(m * p, y, cs).mean() for m in grid_m])
+    assert np.isfinite(curve).all(), f"non-finite MAE curve at h={h} dow={dw}"
+    j = int(curve.argmin())
+    _tm, _pm = float(np.median(y)), float(np.median(p))
+    rows.append(dict(h=h, dow=_DOW[dw], n_true=len(y), n_pred=len(p),
+                     true_q25=np.quantile(y, .25), true_med=_tm,
+                     true_q75=np.quantile(y, .75),
+                     pred_q25=np.quantile(p, .25), pred_med=_pm,
+                     pred_q75=np.quantile(p, .75),
+                     med_mult=(_tm / _pm) if _pm > 0 else np.nan,
+                     med_agree=(abs(_tm - _pm) < 1e-9) or (_pm > 0 and abs(_tm / _pm - 1) < 0.10),
+                     best_m=grid_m[j], mae_at_1=curve[_i1], mae_best=curve[j]))
+Q = pd.DataFrame(rows)
+assert len(Q) > 0, "no (horizon x dow) cell had enough rows on both sides"
+if _drop:
+    print(f"note: dropped {_drop:,} non-finite true ratios before any statistic")
+Q["gain"] = Q.mae_at_1 - Q.mae_best
+print(Q[["h", "dow", "n_true", "n_pred", "true_q25", "true_med", "true_q75",
+         "pred_q25", "pred_med", "pred_q75"]].round(3).to_string(index=False))
+
+line("Q2  MAE-optimal multiplier per cell  (med_mult = median-matching, best_m = MAE-optimal)")
+print(Q[["h", "dow", "n_pred", "med_mult", "best_m", "mae_at_1", "mae_best", "gain"]]
+      .round(4).to_string(index=False))
+print("\nbest_m pinned to a grid edge (0.40 / 2.00) means the optimum is outside the scan:",
+      sorted(set(Q.best_m[(Q.best_m <= 0.40) | (Q.best_m >= 2.00)])) or "none")
+
+line("Q3  what this is worth over the whole submission, if it transfers")
+_wt = Q.n_pred / len(Dp)
+_ord_share = len(Dp) / len(D)
+_cell = float((Q.gain * _wt).sum())
+print(f"cells covered: {len(Q)} | {int(Q.n_pred.sum()):,} of {len(Dp):,} ordinary rows "
+      f"({Q.n_pred.sum() / len(Dp):.1%}) | ordinary = {_ord_share:.1%} of all test rows")
+print(f"weighted MAE gain on the covered ordinary rows : {_cell:.4f}")
+print(f"=> upper bound on total MASE gain              : {_cell * _ord_share * (Q.n_pred.sum() / len(Dp)):.4f}")
+print("\nThis is an UPPER bound and almost certainly optimistic: the scan assumes v4 has no")
+print("within-cell discrimination, and it is fitted on Apr-Sep films then applied to Oct-Mar.")
+
+line("Q4  the honest read on the median")
+print(f"cells where the predicted median already matches the true median: "
+      f"{int(Q.med_agree.sum())} of {len(Q)}")
+print("  (counts a both-zero median as agreement - at D9/D10 the true median IS 0)")
+_mm = Q[(Q.pred_med > 0) & (Q.true_med > 0)]
+if len(_mm):
+    print(f"across the {len(_mm)} cells with both medians non-zero, med_mult"
+          f" median {_mm.med_mult.median():.3f} | range {_mm.med_mult.min():.3f}"
+          f"-{_mm.med_mult.max():.3f}")
+print("if med_mult sits near 1.0, v4's LEVEL is right and the T4 mean gap was skew,")
+print("which closes level post-processing and leaves only the film-curve (oracle A) lever.")
+Q.to_pickle(CACHE_DIR / "horizon_level_check.pkl")
+print(f"\n[CELL 10] {time.time() - t0:.1f}s")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
@@ -1054,6 +1171,94 @@ bound method and matched nothing — CELL 8's M1 sanity check printed `rows 0 | 
 column is now `hist_label`, access is `M["hist_label"]`, M1 asserts non-empty, and
 `build_notebook.py` fails the build if any generated cell accesses a column attribute-style when
 that name collides with the pandas API.
+
+### ROUND 3 — two separate lineages, and the leaderboard has already killed three ideas
+
+**Critical: `FINDINGS.md` / `HANDOVER.md` describe a DIFFERENT lineage from `0.43715.py`.**
+That branch rewrote the pipeline and never beat the baseline:
+
+| build | proxy | LB | note |
+|-------|-------|----|------|
+| `0.46641.ipynb` (v1, ancestor of v4) | 0.4328 OOF | **0.46641** | |
+| rewrite, no Eid guard | 0.3429 | 0.48267 | |
+| rewrite, Eid guard `calendar 0.6` | 0.3429 | 0.47789 | |
+| quantile snap, guard `flat 1.0`, film_curve, lags 0-12 | ~0.337 | **0.46795** | best of that branch |
+| + model Z | 0.3377 | **0.52220** | |
+| + Z at 100%, capped snap, lags 0-24 | **0.3348** (best proxy) | **0.53421** (worst LB) | |
+| **v3/v4 `0.43715.py`** (team's line) | 0.344 / 0.354 | **0.43715** | **current best** |
+
+So the rewrite's best is 0.03 *behind* v4, and its proxy is anti-correlated with the LB. Its
+*negative* results measured on that proxy do not automatically transfer to v4 — but the three
+measured on the **leaderboard itself** do, and they are decisive.
+
+**1. The two-part zero model is dead.** 0.46795 → 0.52220 → 0.53421. Model Z improved the proxy on
+every build and lost 0.05-0.07 on the LB every time. Not a threshold-transfer bug — rank-based
+deciles score the same (`z_shift.py`). Forcing exact zeros is **one-sided**: a wrongly zeroed row
+forfeits the entire true ratio, so the downside is unbounded while the upside is capped at the
+prediction it replaced. Optimal under a matched distribution, reckless under the Apr-Sep → Oct-Mar
+shift. This kills the friend's reported +0.008 as a direction for us.
+
+**2. CELL 9's T4 says v4 has no zero-share problem at all.** On the matched release-anchored
+population the zero gaps are +2.7, -0.1, +2.1, +1.7, -1.9, -1.6, -5.0 pp across D4-D10 — already
+calibrated. Round 2's "30.57% predicted vs 43.5% true" was a population artifact: the 43.5% came
+from a different window construction, and the 30.57% was pooled over Ramadan rows. Both the
+leaderboard and the matched measurement now point the same way. **Stop pursuing zeros.**
+
+**3. The Eid cohort is worth ~0.005, confirmed on the leaderboard.** The clean A/B (0.48267 no
+guard → 0.47789 with `calendar 0.6`) is **-0.00478** on 6.08% of rows. That lands inside CELL 7's
+estimate of 0.0058-0.0255 and v4 already predicts that cohort at mean ratio 1.0943 with 0.00%
+zeros. Essentially spent.
+
+**4. T4's `mean_mult` of 1.26 (D4) and 1.45 (D5) is mostly skew, not bias.** The true ordinary
+D4 distribution has median 0.9146 but mean 1.0612. Matching the *mean* pushes predictions above
+the median and *costs* MAE — this is the documented `+0.0163` regression in build 1 ("far horizons
+shipped at the mean, not the median"). CELL 10 redoes the comparison on medians and MAE-optimal
+multipliers instead. Do not act on T4 directly.
+
+### The oracle study — the ranking that should drive effort
+
+Each oracle gets perfect knowledge of one quantity; the gap is the ceiling on predicting it well.
+
+| oracle | MASE | ceiling |
+|--------|------|---------|
+| baseline | 0.3944 | — |
+| **A — the film's own national D4-D10 ratio curve** | **0.3039** | **+0.0905** |
+| D — the pair's own 7-day total | 0.3214 | +0.0731 |
+| B — whether each row is zero | 0.3350 | +0.0595 |
+| C — the target date's national demand | 0.3867 | +0.0078 |
+
+Oracle A uses **no pair-level information** and still beats the full per-pair baseline by 23%.
+That branch banks only +0.0209 of it via a median table. It is the one lever large enough to close
+our 0.093 gap, and it requires **retraining** — so `cinema_forecasting_v3.py` is the critical path.
+
+**Oracle C's +0.0078 is contested, and it is the ceiling on CELL 8's market index.** `FINDINGS.md`
+dismisses the cross-film/national-date direction on the strength of it. But the oracle was measured
+on the **train proxy, which has almost no calendar variance** — the same structural objection that
+document raises against its own §8, then forgets when reading its own oracle. Train anomaly rows
+are 7.1% against 31.8% in test, and CELL 8 measures market ratios from 0.295 to 10.0 inside
+Ramadan 1447 H, a spread train simply does not contain. An oracle handed a near-constant quantity
+will always show a near-zero ceiling. Independent sizing: MASE divides by each pair's own `scale`,
+so a uniform level shift is absorbed and only **straddles** bite — 13.34% of rows (CELL 5) at
+market ratios of 0.56-2.41, worth roughly **0.005-0.02**, and CELL 7's S2 suggests v4 already
+captures most of it (predicted Ramadan ratio 0.4116 against 0.519 x 0.811 = 0.421 expected).
+Verdict: real but small, and not the 0.09 we need.
+
+### Mandatory validation gate, adopted
+
+> Ship a change only if it improves **both** the random-film proxy **and** a time-based holdout
+> (train on the earliest 75% of films by release date, score the latest 25%).
+
+Model Z passed the proxy and failed the holdout (0.3922 → 0.3999) before it failed the LB twice.
+v1 had this holdout; the rewrite dropped it, and that single omission cost two submissions.
+
+### Correction to a reported inference
+
+"The same submission file gives the same score, so the split is not random" does **not** follow.
+Every Kaggle public/private split is *fixed* once chosen, so re-submitting an identical file always
+reproduces its score regardless of whether the 30% was drawn at random or cut by date. That test
+has no power here. The question is still open, and it matters: if the split is by date, the
+2026-03-18 Eid cohort sits at the very end of the test period and may be **entirely absent from the
+public 30%**, which would make every Eid probe uninformative.
 
 ### The headline problem: CV gains are not transferring
 
