@@ -1399,6 +1399,125 @@ else:
 print(f"\n[CELL 12] {time.time() - t0:.1f}s")
 """)
 
+md(r"""
+## CELL 13 — is model diversity worth anything here? (the ensemble / neural-net question)
+
+v4 already blends two LightGBMs plus a zero classifier. This cell asks whether *any* additional
+model class can help, by adding a deliberately alien third class — a hierarchical median lookup
+table over `h x d1_dow x scale bin`, with no feature interactions and no boosting — and measuring
+**absolute-error correlation** and **cross-fitted blend gain** on both fold schemes.
+
+The point is not the median table itself. It is the correlation: if a model this structurally
+different still tracks LightGBM's errors, then the residual is irreducible given these features
+and no architecture — neural net included — changes that. Run it before spending days on a new
+model class.
+
+Results are in the DECISION LOG (round 5). Reuses CELL 11's cached window table.
+""")
+code(r"""
+# CELL 13 — MODEL DIVERSITY CEILING (moderate; needs CELL 11's cache)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+import itertools
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Needs cache/v4_window_table.pkl from CELL 11.")
+else:
+    v3 = sys.modules["cinema_forecasting_v3"]
+    v4 = sys.modules["v4_script"]
+    data = pd.read_pickle(CACHE_DIR / "v4_window_table.pkl")
+    vp = (data.window == 0) & ~data.bad
+    pool, s = data[vp], data[vp]
+    yy = s.y.to_numpy()
+    F = v4.FEATSETS[V4_FS]
+
+    def med_oof(kind):
+        # deliberately alien third class: hierarchical median table, no interactions
+        folds = v3.make_folds(pool, kind)
+        o = pd.Series(np.nan, index=data.index)
+        d = data.assign(sb=pd.cut(data.scale, [0, 5, 15, 40, 100, 1e9], labels=False))
+        base = d.window.isin(v3.ALL_OFFSETS) & ~d.bad
+        we = d.d1 + pd.Timedelta(days=9)
+        for vm, pu in folds:
+            iv = d.movie_title.isin(vm)
+            trm = base & ~iv
+            if pu is not None:
+                trm &= ~((d.d1 <= pu[1]) & (we >= pu[0]))     # same purge as v3
+            T = d[trm]
+            t3 = T.groupby(["h", "d1_dow", "sb"], observed=True).y.median()
+            t2 = T.groupby(["h", "d1_dow"], observed=True).y.median()
+            gm = T.y.median()
+            o[vp & iv] = [t3.get((a, b, c), t2.get((a, b), gm)) for a, b, c in
+                          zip(d.loc[vp & iv, "h"], d.loc[vp & iv, "d1_dow"],
+                              d.loc[vp & iv, "sb"])]
+        return o
+
+    def simp(n, st=0.1):
+        g = np.round(np.arange(0, 1 + 1e-9, st), 2)
+        for c in itertools.product(g, repeat=n - 1):
+            if sum(c) <= 1 + 1e-9:
+                yield np.array(list(c) + [round(1 - sum(c), 2)])
+
+    for kind in ("group", "time"):
+        line(f"D1  [{kind}] standalone accuracy and absolute-error correlation")
+        O = {}
+        _ap = CACHE_DIR / f"oof_{V4_FS}_{V4_WOPEN}_{V4_PS}_{kind}.pkl"
+        assert _ap.exists(), f"run CELL 11 first to produce {_ap}"
+        O["A"] = pd.read_pickle(_ap)
+        for nm, mk in (("B", lambda: v4.run_cv(data, F, v3.make_folds(pool, kind),
+                                               v4.PARAMS_B, w_open=V4_WOPEN)[0]),
+                       ("M", lambda: med_oof(kind))):
+            _p = CACHE_DIR / f"oof_{nm}_{kind}.pkl"
+            if _p.exists():
+                O[nm] = pd.read_pickle(_p)
+            else:
+                _t = time.time()
+                O[nm] = mk()
+                pd.to_pickle(O[nm], _p)
+                print(f"  trained {nm} in {time.time() - _t:.0f}s", flush=True)
+        eA = np.abs(yy - O["A"][s.index].to_numpy())
+        for nm, lab in (("A", "A  LightGBM P2"), ("B", "B  LightGBM extra_trees"),
+                        ("M", "M  median table (alien class)")):
+            e = np.abs(yy - O[nm][s.index].to_numpy())
+            print(f"  {lab:32s} MASE {e.mean():.4f} | abs-err corr vs A "
+                  f"{np.corrcoef(e, eA)[0, 1]:.3f}")
+
+        line(f"D2  [{kind}] cross-fitted blend gains")
+        folds = v3.make_folds(pool, kind)
+        for names in (["A", "B"], ["A", "M"], ["A", "B", "M"]):
+            b = c = n = 0
+            for vm, _ in folds:
+                m = s.movie_title.isin(vm)
+                va, tr = s[m], s[~m]
+                if not len(va) or not len(tr):
+                    continue
+                Ptr = np.column_stack([O[x][tr.index].to_numpy() for x in names])
+                Pva = np.column_stack([O[x][va.index].to_numpy() for x in names])
+                ytr = tr.y.to_numpy()
+                bw = min(simp(len(names)), key=lambda wv: np.abs(ytr - Ptr @ wv).mean())
+                b += np.abs(va.y.to_numpy() - Pva[:, 0]).sum()
+                c += np.abs(va.y.to_numpy() - Pva @ bw).sum()
+                n += len(va)
+            print(f"  A+{'+'.join(names[1:]):6s}  {b / n:.4f} -> {c / n:.4f}"
+                  f"   gain {(b - c) / n:+.4f}")
+
+        line(f"D3  [{kind}] why: the error is aleatoric and concentrated")
+        P = np.column_stack([O[x][s.index].to_numpy() for x in ("A", "B", "M")])
+        E = np.abs(yy[:, None] - P)
+        print(f"  oracle per-row model choice {E.min(1).mean():.4f} vs best single "
+              f"{E.mean(0).min():.4f}  (hindsight only, no feature selects the winner)")
+        e = E[:, 0]
+        q = np.argsort(-e)
+        for f in (0.01, 0.05, 0.10, 0.25):
+            k = int(f * len(e))
+            print(f"  worst {f:4.0%} of rows carry {e[q[:k]].sum() / e.sum():6.1%} of all error"
+                  f" | their mean true y/scale {np.abs(yy[q[:k]]).mean():7.2f}")
+        print("\n  A fifth of the error sits in 1% of rows whose truth is ~8x their own D1-D3")
+        print("  baseline. That is unpredictable from these features, and MAE forbids chasing it")
+        print("  because the optimum is the median, which v4 already matches.")
+print(f"\n[CELL 13] {time.time() - t0:.1f}s")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
@@ -1637,6 +1756,63 @@ and CELL 7 shows v4 predicting a 0.4116 mean ratio there against roughly 0.519 x
 expected — about 2% low. v4 appears to have *already* absorbed the Ramadan level, so multiplying
 those 12,408 rows down would likely hurt. The regime-average comparison is confounded by horizon
 mix, so it is suggestive, not proof — but it argues against Ramadan as the first probe.
+
+### ROUND 5 — would another model class help? measured: no, and here is why
+
+v4 is **already an ensemble**: model A (LightGBM `P2`, 5 seeds) + model B (`extra_trees`, 255
+leaves, `feature_fraction` 0.5, 3 seeds) + a zero classifier, with blend weight, per-`p0`-decile
+zero multipliers and per-horizon multipliers all fitted by `crossfit` over both schemes.
+
+So the real question is whether *any* model class is decorrelated enough to add value. Measured on
+v4's own folds, with a hierarchical median lookup table as a deliberately alien third class — no
+feature interactions, no boosting, pure non-parametric:
+
+| model | group MASE | time MASE | abs-error correlation with A |
+|-------|-----------|-----------|------------------------------|
+| A — LightGBM `P2` | 0.3497 | 0.3584 | 1.000 |
+| B — LightGBM `extra_trees` | 0.3511 | 0.3604 | **0.996** |
+| median table (`h` x `d1_dow` x scale bin) | 0.4315 | 0.4332 | **0.972** |
+
+Cross-fitted blend gains:
+
+| blend | group | time |
+|-------|-------|------|
+| A + B | +0.0017 | **+0.0004** |
+| A + median table | +0.0000 | +0.0000 |
+| A + B + median table | +0.0017 | +0.0004 |
+
+**A completely different model class still correlates 0.972 on absolute error.** That is the whole
+answer: the residual is not model-specific, so it is not epistemic error that capacity or a new
+architecture could reduce. It is **aleatoric** — irreducible given these features.
+
+The error distribution confirms it:
+
+| rows | share of total error | their mean true `y/scale` |
+|------|---------------------|---------------------------|
+| worst 1% | **20.9%** | 8.11 |
+| worst 5% | 40.3% | 3.42 |
+| worst 10% | 52.7% | 2.31 |
+| worst 25% | 73.9% | 1.35 |
+
+A fifth of all error sits in 1% of rows whose true ratio averages **8.1x** their own D1-D3
+baseline — pairs that sold almost nothing in their first three days and then exploded. Nothing in
+the data predicts that: it is cinema scheduling decisions, local events and word of mouth. And
+chasing the tail is forbidden anyway, because MAE's optimum is the conditional **median** and
+v4's medians are already correct (round 4).
+
+For reference, oracle per-row routing between the three classes scores 0.2769 / 0.2834 — a 0.073
+"gain" that is pure hindsight and unreachable by any blend or stacker, since no feature
+distinguishes which model will happen to be closer on a given row.
+
+**Verdict on deep learning / neural networks / another supervised model: do not.** On ~259k
+tabular training rows with high-cardinality categoricals and an L1 objective, a neural net would
+at best match a GBDT and would land at the same ~0.97 error correlation, so the blend gain stays
+in the 0.000-0.002 range. More decisively, it does not touch the actual bottleneck: **31.6% of
+test rows sit in a calendar regime with zero training examples**, and no architecture learns
+Ramadan from a training set containing no Ramadan.
+
+The one strictly-safe model-side action left is **more seeds** on A and B. It reduces variance
+without introducing a systematic bet, but expect ~0.001-0.003, not 0.08.
 
 ### The headline problem: CV gains are not transferring
 
