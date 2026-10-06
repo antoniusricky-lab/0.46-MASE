@@ -1099,6 +1099,306 @@ Q.to_pickle(CACHE_DIR / "horizon_level_check.pkl")
 print(f"\n[CELL 10] {time.time() - t0:.1f}s")
 """)
 
+md(r"""
+## CELL 11 — the decisive test: v4's own OOF, and whether `H_GRID` is clipped
+
+`cinema_forecasting_v3.py` arrived, and reading it **overturns the population-mismatch thesis**:
+
+- `run_cv` already scores `val_pool = (data.window == 0) & ~data.bad` — v4's CV is **already
+  release-anchored**, so its 0.344 / 0.354 is measured on the same opening-window population as
+  the test. My round-2 claim that v4 validates on mid-run windows was wrong.
+- `make_folds(pool, 'time')` already builds **purged** date-blocked folds.
+- v4 already up-weights opening windows (`w_open`), already fits a zero-snap (`ZERO_GRID`
+  0.00-1.30) and already fits a per-horizon multiplier (`H_GRID`).
+
+Which means CELL 10's Q1 gap is **confounded**: it compares *train* truth (Apr-Sep films) against
+*test* predictions (Oct-Mar films). A gap can mean v4 is biased, or simply that the two film
+populations differ. It cannot distinguish them, so it must not be acted on.
+
+But one thing in v4 is checkable and concrete:
+
+```
+H_GRID = np.round(np.arange(0.85, 1.155, 0.01), 2)      # floor 0.85
+```
+
+CELL 10's scan wanted 0.40-0.68 at D6-D10. If the optimum on v4's **own OOF** also sits below
+0.85, the grid is pinned at its floor and widening it is a free, properly-validated win — the same
+clipped-grid bug the other lineage already paid for. If the optimum sits inside the grid, then
+CELL 10's gap was a population artifact and level post-processing is closed.
+
+This cell settles it on data where the truth is known. It fits the multipliers **cross-fitted**
+(parameters from four folds, scored on the fifth), because fitting and scoring on the same OOF is
+leakage and would manufacture a win. It reports both CV schemes, and the `time` scheme is the gate.
+
+Heavy: builds ~545k windows and runs 5-fold LightGBM. Gated behind `RUN_HEAVY`, resumable, and it
+caches the window table and the OOF so later cells are instant.
+""")
+code(r"""
+# CELL 11 — REPRODUCE v4 OOF, THEN TEST THE CLIPPED H_GRID (heavy, resumable)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+import importlib.util, json as _json
+
+# ---- v4's final() was invoked as: final(featset, w_open, paramset) -----------
+# the v4 docstring says "competition features", "127 leaves / min 100", "extra weight on
+# opening-week windows", so this is the best reconstruction. Change if you learn the real args.
+V4_FS, V4_WOPEN, V4_PS = "H", 2.0, "P2"
+FOLD_KINDS = ("group", "time")
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1 and re-run this cell.")
+    print("Expect roughly 10-40 min per fold scheme on 16 cores.")
+else:
+    _v3p = Path("cinema_forecasting_v3.py")
+    _v4p = Path("0.43715.py")
+    assert _v3p.exists(), "put cinema_forecasting_v3.py next to this notebook"
+    assert _v4p.exists(), "put 0.43715.py next to this notebook"
+
+    def _load(path, name):
+        sp = importlib.util.spec_from_file_location(name, path)
+        m = importlib.util.module_from_spec(sp)
+        sys.modules[name] = m
+        sp.loader.exec_module(m)          # both files guard real work behind __main__
+        return m
+
+    v3 = _load(_v3p, "cinema_forecasting_v3")
+    v4 = _load(_v4p, "v4_script")
+
+    # v3.load_data() hard-codes DATA = 'data/' and expects the canonical six names, but the
+    # real file here is "train (1).csv" and there is no data/ directory. Stage correctly
+    # named copies and repoint v3 at them, rather than renaming anything in place.
+    _stage = CACHE_DIR / "v3data"
+    _stage.mkdir(exist_ok=True)
+    import shutil
+    for _s in ("train", "test_history", "test", "movies", "holidays", "ticket_prices"):
+        _dst = _stage / f"{_s}.csv"
+        _src = find_file(_s)                      # from CELL 1: tolerates the " (1)" suffix
+        if not _dst.exists() or _dst.stat().st_mtime < _src.stat().st_mtime:
+            shutil.copyfile(_src, _dst)
+        print(f"  staged {_s + '.csv':20s} <- {_src.name:24s} {_dst.stat().st_size / 1e6:7.2f} MB")
+    v3.DATA = str(_stage) + os.sep
+    v4.v3.DATA = v3.DATA                          # v4 calls v3.load_data() through its own ref
+    print(f"v3.DATA -> {v3.DATA}")
+
+    print(f"v3 + v4 imported | featset {V4_FS} ({len(v4.FEATSETS[V4_FS])} feats) | "
+          f"w_open {V4_WOPEN} | paramset {V4_PS}")
+    print(f"v4 H_GRID: {v4.H_GRID.min():.2f} .. {v4.H_GRID.max():.3f}   <-- floor under test")
+
+    # ------------------------------------------------- 1. window table (cached)
+    # NOTE: use v4.load_table(), not v3.prepare(). Featsets F/G/H need v4's own
+    # competition (comp_nat, comp_nat_rel, comp_cl, comp_cl_rel) and cluster-weekday
+    # (cl_dow_t, cl_dow_h, cl_dow_r) columns, which v3.prepare() does not add.
+    _tab = CACHE_DIR / "v4_window_table.pkl"
+    if _tab.exists():
+        data = pd.read_pickle(_tab)
+        print(f"window table loaded from cache: {data.shape}")
+    else:
+        print("building window table via v4.load_table() ...", flush=True)
+        data, _ctx = v4.load_table()
+        data.to_pickle(_tab)
+        print(f"window table built and cached: {data.shape}")
+    _need = [c for c in v4.FEATSETS[V4_FS] if c not in data.columns]
+    assert not _need, (f"cached table predates the featset - delete {_tab} and re-run. "
+                       f"missing: {_need}")
+    # LightGBM rejects str/object columns; under pandas 3 these stay `str` unless encoded.
+    if str(data[v3.CAT_COLS[0]].dtype) != "category":
+        v3.encode_cats([data])
+        data.to_pickle(_tab)
+    print("categoricals:", {c: str(data[c].dtype) for c in v3.CAT_COLS})
+    _vp = (data.window == 0) & ~data.bad
+    print(f"rows {len(data):,} | clean release (offset 0) rows {int(_vp.sum()):,} "
+          f"| opening-offset rows {int(data.window.isin(v3.OPEN_OFFSETS).sum()):,}")
+
+    # --------------------------------------------- 2. OOF per fold scheme (cached)
+    pool = data[_vp]
+    OOF = {}
+    for kind in FOLD_KINDS:
+        _op = CACHE_DIR / f"oof_{V4_FS}_{V4_WOPEN}_{V4_PS}_{kind}.pkl"
+        if _op.exists():
+            OOF[kind] = pd.read_pickle(_op)
+            print(f"[{kind}] OOF from cache ({int(OOF[kind].notna().sum()):,} rows)")
+        else:
+            print(f"[{kind}] running 5-fold CV ...", flush=True)
+            _f = v3.make_folds(pool, kind)
+            _o, _it = v4.run_cv(data, v4.FEATSETS[V4_FS], _f, v4.PARAMSETS[V4_PS],
+                                w_open=V4_WOPEN)
+            OOF[kind] = _o
+            pd.to_pickle(_o, _op)
+            print(f"[{kind}] done, best_iters {_it}")
+        _s = data[_vp & OOF[kind].notna()]
+        _m = (_s.y - OOF[kind][_s.index]).abs().mean()
+        print(f"[{kind}] pooled MASE on clean release windows = {_m:.4f}  "
+              f"({len(_s):,} rows)")
+        (OUT_DIR / f"cv_{V4_FS}_{V4_WOPEN}_{V4_PS}_{kind}.json").write_text(
+            _json.dumps({"mase": float(_m), "rows": int(len(_s))}))
+
+    # ------------------------- 3. the real question: where does the optimum sit?
+    def opt_mult(y, p, grid):
+        # MAE-optimal scalar multiplier on p against known y
+        return grid[int(np.argmin([np.abs(y - g * p).mean() for g in grid]))]
+
+    WIDE = np.round(np.arange(0.20, 1.401, 0.01), 2)
+    for kind in FOLD_KINDS:
+        line(f"H1  [{kind}] MAE-optimal per-horizon multiplier: v4's grid vs a wide grid")
+        s = data[_vp & OOF[kind].notna()].copy()
+        s["p"] = OOF[kind][s.index].to_numpy()
+        s["dow"] = s.d1.dt.dayofweek
+        rows = []
+        for h, g in s.groupby("h"):
+            y, p = g.y.to_numpy(), g.p.to_numpy()
+            m_v4, m_wide = opt_mult(y, p, v4.H_GRID), opt_mult(y, p, WIDE)
+            rows.append(dict(h=h, rows=len(g), mase_at_1=np.abs(y - p).mean(),
+                             m_v4grid=m_v4, mase_v4grid=np.abs(y - m_v4 * p).mean(),
+                             m_wide=m_wide, mase_wide=np.abs(y - m_wide * p).mean(),
+                             pinned=bool(m_v4 <= v4.H_GRID.min() + 1e-9)))
+        H = pd.DataFrame(rows)
+        H["extra_gain"] = H.mase_v4grid - H.mase_wide
+        print(H.round(4).to_string(index=False))
+        _np = int(H.pinned.sum())
+        print(f"\nhorizons pinned to v4's 0.85 floor: {_np} of {len(H)}")
+        print(f"extra MASE from widening the grid (row-weighted): "
+              f"{float((H.extra_gain * H.rows).sum() / H.rows.sum()):.4f}")
+        if _np == 0:
+            print("NOT pinned -> v4's grid is adequate and CELL 10's gap was a population")
+            print("artifact. Level post-processing is closed; do not spend a submission on it.")
+
+        line(f"H2  [{kind}] cross-fitted: does widening actually generalise?")
+        _folds = v3.make_folds(pool, kind)
+        for tag, keys, grid in (("per-horizon, v4 grid", ["h"], v4.H_GRID),
+                                ("per-horizon, wide", ["h"], WIDE),
+                                ("per-horizon x D1-dow, wide", ["h", "dow"], WIDE)):
+            base, corr, n = 0.0, 0.0, 0
+            for vm, _ in _folds:
+                va = s[s.movie_title.isin(vm)]
+                trn = s[~s.movie_title.isin(vm)]
+                if not len(va) or not len(trn):
+                    continue
+                mt = {k: opt_mult(g.y.to_numpy(), g.p.to_numpy(), grid)
+                      for k, g in trn.groupby(keys)}
+                mm = np.array([mt.get(k, 1.0) for k in
+                               (zip(*[va[c] for c in keys]) if len(keys) > 1 else va[keys[0]])])
+                base += np.abs(va.y - va.p).sum()
+                corr += np.abs(va.y.to_numpy() - mm * va.p.to_numpy()).sum()
+                n += len(va)
+            print(f"  {tag:30s} MASE {base / n:.4f} -> {corr / n:.4f}  "
+                  f"(gain {(base - corr) / n:+.4f})")
+        print("\nA gain here is measured the honest way: multipliers fitted on four folds and")
+        print("scored on the fifth. Only act if BOTH schemes agree, and trust 'time' more.")
+        s[["h", "dow", "y", "p", "movie_title", "d1", "scale"]].to_pickle(
+            CACHE_DIR / f"oof_frame_{kind}.pkl")
+print(f"\n[CELL 11] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 12 — candidate feature experiments against v4's own CV
+
+Two candidates, both run through v4's unmodified `run_cv` on **both** fold schemes, so the
+both-schemes gate applies. Results are already recorded in the DECISION LOG; this cell exists so
+they are reproducible rather than taken on trust.
+
+1. **`film_curve` (oracle A).** A stage-1 LightGBM predicts each film-window's aggregate
+   `sum(tickets)/sum(scale)` curve, out of fold against the same film folds, and the prediction is
+   exposed as a feature. Oracle A's ceiling was quoted at +0.0905.
+2. **Sibling format variants.** 16 base titles ship more than one format (IMAX/3D/dubbed). For
+   each `(base_title, cluster, window, horizon)` the sibling's D1-D3 strength is added, excluding
+   the row itself. Listed as unexplored in `HANDOVER.md` §10.5.
+
+Both were **rejected**. Keep this cell for the harness: swapping in a new feature list is a
+two-line change, and it is the only place a candidate can be judged honestly.
+""")
+code(r"""
+# CELL 12 — CANDIDATE FEATURES vs v4 CV (heavy, gated)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Needs CELL 11's cached window table.")
+else:
+    import lightgbm as lgb
+    v3 = sys.modules["cinema_forecasting_v3"]
+    v4 = sys.modules["v4_script"]
+    data = pd.read_pickle(CACHE_DIR / "v4_window_table.pkl")
+    vp = (data.window == 0) & ~data.bad
+    pool = data[vp]
+    BASE_FEATS = v4.FEATSETS[V4_FS]
+
+    def bench(frame, label_feats, kinds=("group", "time")):
+        # one row per (scheme, variant): v4's own run_cv, nothing reweighted
+        for kind in kinds:
+            folds = v3.make_folds(pool, kind)
+            out = {}
+            for tag, feats in label_feats:
+                _t = time.time()
+                o, _ = v4.run_cv(frame, feats, folds, v4.PARAMSETS[V4_PS], w_open=V4_WOPEN)
+                s = frame[vp & o.notna()]
+                out[tag] = float((s.y - o[s.index]).abs().mean())
+                print(f"  [{kind}] {tag:22s} MASE {out[tag]:.4f}  ({time.time() - _t:.0f}s)",
+                      flush=True)
+            _b = out[label_feats[0][0]]
+            for tag in list(out)[1:]:
+                _d = out[tag] - _b
+                print(f"  [{kind}] --> {tag} delta {_d:+.4f}"
+                      f"  {'IMPROVES' if _d < 0 else 'WORSE'}")
+            yield kind, out
+
+    # ---------------------------------------------------- 1. film_curve (oracle A)
+    line("E1  film_curve: a stage-1 film-window curve exposed as a feature")
+    K = ["movie_title", "window"]
+    S1F = ["h", "nat_log", "nat_r31", "nat_r32", "nc3", "nat_tps3", "d1_dow", "dow", "price",
+           "genre1", "age_rating"]
+    agg = (data.groupby(K + ["h"], as_index=False)
+           .agg(tick=("total_ticket", "sum"), sc=("scale", "sum"),
+                **{c: (c, "first") for c in S1F if c != "h"}))
+    agg["fy"] = agg.tick / agg.sc
+    S1P = dict(objective="l1", learning_rate=0.05, num_leaves=31, min_data_in_leaf=40,
+               feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, verbose=-1, seed=SEED)
+    _md = float(np.abs(agg.fy - agg.groupby("h").fy.transform("median")).mean())
+    for kind in ("group", "time"):
+        agg["fc"] = np.nan
+        for vm, _ in v3.make_folds(pool, kind):
+            trm = ~agg.movie_title.isin(vm)
+            if trm.all():
+                continue
+            _m = lgb.train(S1P, lgb.Dataset(agg.loc[trm, S1F], agg.loc[trm, "fy"]), 400)
+            agg.loc[~trm, "fc"] = _m.predict(agg.loc[~trm, S1F])
+        d2 = data.merge(agg[K + ["h", "fc"]], on=K + ["h"], how="left")
+        d2.index = data.index
+        print(f"[{kind}] stage-1 OOF MAE {float(np.abs(agg.fy - agg.fc).mean()):.4f} vs "
+              f"per-horizon median {_md:.4f} | coverage {d2.fc.notna().mean():.1%}"
+              f"  (NaN = mid-run-only films, which are never validated)")
+        list(bench(d2, [("v4 baseline", BASE_FEATS),
+                        ("v4 + film_curve", BASE_FEATS + ["fc"])], kinds=(kind,)))
+    print("\nstage 1 HAS skill, yet the feature hurts: v4 already carries the film-level D1-D3")
+    print("aggregates (nat_log/nat_r31/nat_r32/nc3/nat_tps3/share3) that stage 1 is built from,")
+    print("so `fc` is a strictly less expressive function of inputs the main model already sees.")
+
+    # ------------------------------------------------- 2. sibling format variants
+    line("E2  sibling format variants (IMAX / 3D / dubbed siblings of the same base title)")
+    data["base_title"] = (data.movie_title.astype(str)
+                          .str.replace(r"\s*\((?![^)]*\b(?:PART|CHAPTER|VOL)\b)[^)]*\)\s*$",
+                                       "", regex=True).str.strip())
+    _nb = data.groupby("base_title").movie_title.nunique()
+    _multi = set(_nb[_nb > 1].index)
+    print(f"base titles {len(_nb)} | with >1 format {len(_multi)} | rows in a multi-format "
+          f"family {data.base_title.isin(_multi).mean():.1%}")
+    _g = data.groupby(["base_title", "cinema_ids", "window", "h"], as_index=False).agg(
+        fam_t3=("t3", "sum"), fam_t1=("t1", "sum"), fam_n=("t3", "size"), fam_sc=("scale", "sum"))
+    d3 = data.merge(_g, on=["base_title", "cinema_ids", "window", "h"], how="left")
+    d3.index = data.index
+    d3["sib_n"] = d3.fam_n - 1
+    d3["sib_t3"] = d3.fam_t3 - d3.t3
+    d3["sib_t1"] = d3.fam_t1 - d3.t1
+    d3["sib_sc"] = d3.fam_sc - d3.scale
+    d3["sib_share"] = np.where(d3.fam_t3 > 0, d3.t3 / d3.fam_t3, 1.0)
+    d3["sib_rel"] = np.where(d3.scale > 0, d3.sib_sc / d3.scale, 0.0)
+    SIB = ["sib_n", "sib_t3", "sib_t1", "sib_sc", "sib_share", "sib_rel"]
+    print(f"rows with at least one sibling: {(d3.sib_n > 0).mean():.1%}")
+    list(bench(d3, [("v4 baseline", BASE_FEATS), ("v4 + sibling", BASE_FEATS + SIB)]))
+    print("\nNote the split verdict: this helps the grouped scheme and hurts the purged time")
+    print("scheme. That is the model-Z signature, so the gate rejects it.")
+print(f"\n[CELL 12] {time.time() - t0:.1f}s")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
@@ -1259,6 +1559,84 @@ reproduces its score regardless of whether the 30% was drawn at random or cut by
 has no power here. The question is still open, and it matters: if the split is by date, the
 2026-03-18 Eid cohort sits at the very end of the test period and may be **entirely absent from the
 public 30%**, which would make every Eid probe uninformative.
+
+### ROUND 4 — v3 arrived, v4 reproduced, and every remaining lever measured out at zero
+
+`cinema_forecasting_v3.py` is complete (all 18 symbols; `BAD_START, BAD_END` is a tuple
+assignment). v4 reproduced end to end as `final(fs='H', w_open=2.0, ps='P2')`:
+
+| scheme | reproduced MASE | reported |
+|--------|-----------------|----------|
+| `group` (5-fold by movie) | **0.3497** | 0.344 |
+| `time` (5 purged date blocks) | **0.3584** | 0.354 |
+
+Within ~0.005, so the reconstruction is faithful. Window table 545,153 rows, 47,761 clean release
+rows, builds in ~3 s; each CV scheme runs in ~2.5 min on 8 threads.
+
+Two practical gotchas, both handled in CELL 11: `v3.load_data()` hard-codes `DATA = 'data/'` and
+the canonical six filenames (the real file is `train (1).csv`), so the files must be staged and
+`v3.DATA` repointed; and `v3.encode_cats([data])` is mandatory or LightGBM rejects the four
+`str`-dtype categoricals under pandas 3.
+
+**Reading v3 retracts my round-2 thesis.** `run_cv` scores `val_pool = (data.window == 0) &
+~data.bad` — v4's CV was **already release-anchored**, `make_folds(pool,'time')` already purges,
+and v4 already up-weights opening windows. v4's CV is honest about the population. CELL 10's Q1
+gap was therefore **confounded** — it compared *train* truth against *test* predictions, two
+different film populations — and must not be acted on.
+
+#### Measured on v4's own OOF, where the truth is known
+
+| test | group | time | verdict |
+|------|-------|------|---------|
+| horizons pinned to v4's `H_GRID` floor of 0.85 | **0 of 7** | **0 of 7** | grid is *not* clipped |
+| per-horizon multiplier, cross-fitted | **+0.0000** | **+0.0000** | no gain |
+| per-horizon x D1-dow multiplier, cross-fitted | **-0.0055** | **-0.0148** | harmful |
+| `film_curve` / stage-1 oracle A | **+0.0022** | **+0.0034** | harmful |
+| sibling format variants | -0.0028 | **+0.0039** | split -> rejected |
+
+Optimal per-horizon multipliers land at 0.88-1.05, comfortably inside v4's grid. So the clipped-
+grid bug that cost the other lineage does **not** exist in v4, and CELL 10's wish for 0.40-0.68
+was the population artifact, not a bias.
+
+v4's calibration on the matched population is genuinely good — true vs predicted medians:
+
+| h | D4 | D5 | D6 | D7 | D8 | D9 | D10 |
+|---|----|----|----|----|----|----|-----|
+| true median | 0.931 | 0.655 | 0.493 | 0.385 | 0.184 | 0.000 | 0.000 |
+| v4 OOF median | 0.920 | 0.623 | 0.476 | 0.380 | 0.225 | 0.150 | 0.150 |
+| true zero share | 9.6% | 14.1% | 20.2% | 28.6% | 42.6% | 50.4% | 54.6% |
+
+and v4's shipped zero shares (CELL 7: 51.2% at D9, 57.1% at D10) track the true 50.4% / 54.6%
+almost exactly, so its `ZERO_GRID` snap is already well fitted.
+
+**`film_curve` failed for an instructive reason.** Stage 1 has real skill — OOF MAE 0.2278 against
+0.3715 for a per-horizon median, 39% better. But v4's `BASE` already contains the film-level
+D1-D3 aggregates (`nat_r31`, `nat_r32`, `nat_log`, `nc3`, `nat_tps3`, `share3`) that stage 1 is
+built from, so `fc` is a strictly less expressive function of inputs the main model already sees.
+Oracle A's +0.0905 ceiling was measured against a baseline that **lacked** those features; v4 has
+already banked the accessible part. This retracts round-3's "only lever large enough".
+
+**Sibling features show the gate earning its keep**: -0.0028 on grouped, +0.0039 on purged time.
+That split is the model-Z signature, so it is rejected rather than shipped.
+
+#### Where this leaves the gap
+
+v4 `time` CV 0.3584 vs LB 0.43715 = **+0.079**, and nothing above explains it. Solving
+`0.684 x 0.3584 + 0.316 x X = 0.43715` puts the non-ordinary 31.6% of test rows at **X = 0.608**,
+1.70x the ordinary rows. The leader's 0.34456 is *below* v4's own ordinary-population CV, which is
+only reachable by making the calendar-anomaly rows behave roughly like ordinary ones.
+
+So the entire remaining gap is the calendar regime, and it is **structurally unlearnable**: train
+holds no Ramadan at all and starts at Eid+1, so no training window can straddle into Eid. Any
+correction there is a **prior**, and the leaderboard is the only instrument that can read it.
+Which also means Oracle C's +0.0078 "ceiling" remains unusable as evidence — it was measured on a
+population containing none of the phenomenon.
+
+**One caveat against over-correcting Ramadan.** CELL 8 measures the Ramadan market ratio at 0.811
+and CELL 7 shows v4 predicting a 0.4116 mean ratio there against roughly 0.519 x 0.811 = 0.421
+expected — about 2% low. v4 appears to have *already* absorbed the Ramadan level, so multiplying
+those 12,408 rows down would likely hurt. The regime-average comparison is confounded by horizon
+mix, so it is suggestive, not proof — but it argues against Ramadan as the first probe.
 
 ### The headline problem: CV gains are not transferring
 

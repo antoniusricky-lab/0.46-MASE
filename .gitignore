@@ -1,6 +1,6 @@
 cache/
-results/
-submissions/
-__pycache__/
 .ipynb_checkpoints/
 *.pyc
+__pycache__/
+results/
+submissions/
