@@ -1518,6 +1518,129 @@ else:
 print(f"\n[CELL 13] {time.time() - t0:.1f}s")
 """)
 
+md(r"""
+## CELL 14 — the test-mix-weighted metric, and the two changes that survived
+
+**This is the most useful cell in the notebook.** `W1` builds the scale-bin importance weights
+and shows that reweighting v4's CV to the test's scale distribution reproduces the leaderboard
+(0.4482 / 0.4551 against an actual 0.43715). Use `wmase()` as the selection metric for every
+future experiment — selecting on plain CV is what made six rounds of gains fail to transfer.
+
+`W2` then applies the only two changes that passed the both-schemes gate and writes
+`submission_v5a.csv`:
+
+1. **featset `F`** (`FEAT_E + COMP`) instead of `H` — dropping the `CLDOW` block. -0.0017 time /
+   -0.0022 group.
+2. **post-processing fitted on the weighted metric** rather than plain MASE. -0.0023 time /
+   -0.0004 group.
+
+Expect roughly **0.437 -> 0.433**. Modest and verified. Set `RUN_HEAVY = True`.
+""")
+code(r"""
+# CELL 14 — WEIGHTED METRIC + submission_v5a.csv
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+SCALE_EDGES = [0, 2, 5, 10, 25, 50, 100, 250, 1e9]
+SB_LAB = ["<=2", "2-5", "5-10", "10-25", "25-50", "50-100", "100-250", ">250"]
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Needs CELL 11's cached window table.")
+else:
+    v3 = sys.modules["cinema_forecasting_v3"]
+    v4 = sys.modules["v4_script"]
+    data = pd.read_pickle(CACHE_DIR / "v4_window_table.pkl")
+    test = pd.read_pickle(CACHE_DIR / "v4_test_table.pkl")
+    vp = (data.window == 0) & ~data.bad
+
+    line("W1  the gap is scale composition - build the weighted metric")
+    _sb = pd.cut(data.scale, SCALE_EDGES, labels=False).fillna(7).astype(int)
+    _sbt = pd.cut(test.scale, SCALE_EDGES, labels=False).fillna(7).astype(int)
+    te_sh = _sbt.value_counts(normalize=True).reindex(range(8)).fillna(0)
+    va_sh = _sb[vp].value_counts(normalize=True).reindex(range(8)).fillna(0)
+    w_eval = (te_sh / va_sh.replace(0, np.nan)).fillna(1.0).to_numpy()
+    EW = w_eval[_sb.to_numpy()]
+    print(pd.DataFrame({"bin": SB_LAB, "valid_share": va_sh.to_numpy(),
+                        "test_share": te_sh.to_numpy(), "weight": w_eval}).round(4).to_string(index=False))
+
+    def wmase(oof):
+        # (plain MASE, test-mix-weighted MASE) -- ALWAYS select on the second one
+        s = data.loc[oof.index]
+        e = np.abs(s.y - oof.clip(lower=0))
+        w = EW[data.index.get_indexer(oof.index)]
+        return float(e.mean()), float((e * w).sum() / w.sum())
+
+    for kind in ("group", "time"):
+        _p = CACHE_DIR / f"oof_{V4_FS}_{V4_WOPEN}_{V4_PS}_{kind}.pkl"
+        if _p.exists():
+            a, b = wmase(pd.read_pickle(_p))
+            print(f"  [{kind}] v4 pooled CV {a:.4f} -> REWEIGHTED {b:.4f}   (actual LB 0.43715)")
+
+    line("W2  train the two surviving changes on all data and write submission_v5a.csv")
+    FS = "F"
+    feats = v4.FEATSETS[FS]
+    folds = {k: v3.make_folds(data[vp], k) for k in ("group", "time")}
+    OO = {}
+    for nm, (pp, kd) in {"A": (v4.PARAMSETS[V4_PS], "reg"), "B": (v4.PARAMS_B, "reg"),
+                         "p0": (v4.PARAMSETS[V4_PS], "clf")}.items():
+        parts = []
+        for kind in ("group", "time"):
+            _c = CACHE_DIR / f"oofF_{nm}_{kind}.pkl"
+            if _c.exists():
+                o = pd.read_pickle(_c)
+            else:
+                o, _ = v4.run_cv(data, feats, folds[kind], pp, w_open=V4_WOPEN, kind=kd)
+                pd.to_pickle(o, _c)
+                print(f"  trained {nm} [{kind}]", flush=True)
+            parts.append(o)
+        OO[nm] = parts
+    # fit post-processing on both schemes pooled, minimising the WEIGHTED objective
+    frames = []
+    for i, kind in enumerate(("group", "time")):
+        idx = OO["A"][i].index
+        frames.append(pd.DataFrame({"y": data.y.loc[idx], "A": OO["A"][i].clip(lower=0),
+                                    "B": OO["B"][i].clip(lower=0), "p0": OO["p0"][i].loc[idx],
+                                    "h": data.h.loc[idx], "sb": _sb.loc[idx]}))
+    fr = pd.concat(frames)
+    fr["w"] = w_eval[fr.sb.to_numpy()]
+    y, ww = fr.y.to_numpy(), fr.w.to_numpy()
+    bf = lambda g, er: g[int(np.argmin([er(x) for x in g]))]
+    a_, b_ = fr.A.to_numpy(), fr.B.to_numpy()
+    w0 = bf(v4.W_GRID, lambda w: (ww * np.abs(y - w * a_ - (1 - w) * b_)).sum())
+    r = w0 * a_ + (1 - w0) * b_
+    bn = v4.zero_bin(fr.p0.to_numpy())
+    zm = np.ones(10)
+    for k in range(10):
+        m_ = bn == k
+        if m_.sum() >= 200:
+            zm[k] = bf(v4.ZERO_GRID, lambda m: (ww[m_] * np.abs(y[m_] - m * r[m_])).sum())
+    r = r * zm[bn]
+    hm = {}
+    for k in v3.HORIZONS:
+        m_ = fr.h.to_numpy() == k
+        if m_.sum():
+            hm[k] = bf(v4.H_GRID, lambda m: (ww[m_] * np.abs(y[m_] - m * r[m_])).sum())
+    print(f"  blend weight A={w0:.2f} | zero multipliers {np.round(zm, 2).tolist()}")
+    print(f"  horizon multipliers {hm}")
+
+    # round counts: v4 trains the final models for the mean best_iteration seen in CV.
+    # Measured here: ~255 (time) and ~273 (group) for A. 1.3x gives the usual full-data margin.
+    N_A, N_B, N_P = 350, 350, 300
+    mA = v4.train_full(data, feats, v4.PARAMSETS[V4_PS], N_A,
+                       [SEED + i for i in range(5)], V4_WOPEN)
+    mB = v4.train_full(data, feats, v4.PARAMS_B, N_B,
+                       [SEED + 100 + i for i in range(3)], V4_WOPEN)
+    mP = v4.train_full(data, feats, v4.PARAMSETS[V4_PS], N_P,
+                       [SEED + 200 + i for i in range(3)], V4_WOPEN, 'clf')
+    tf = pd.DataFrame({"A": np.clip(mA, 0, None), "B": np.clip(mB, 0, None), "p0": mP,
+                       "h": test.h.to_numpy()})
+    rt = w0 * tf.A.to_numpy() + (1 - w0) * tf.B.to_numpy()
+    rt = rt * zm[v4.zero_bin(tf.p0.to_numpy())]
+    rt = rt * pd.Series(tf.h.to_numpy()).map(hm).fillna(1.0).to_numpy()
+    v4.write_sub("submission_v5a.csv", test, rt, test.scale.to_numpy())
+    print("\n  submission_v5a.csv written. Expect roughly 0.437 -> 0.433.")
+print(f"\n[CELL 14] {time.time() - t0:.1f}s")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
@@ -1813,6 +1936,94 @@ Ramadan from a training set containing no Ramadan.
 
 The one strictly-safe model-side action left is **more seeds** on A and B. It reduces variance
 without introducing a systematic bet, but expect ~0.001-0.003, not 0.08.
+
+### ROUND 6 — the gap is SCALE COMPOSITION, and we finally have an honest offline LB proxy
+
+**This supersedes the round-4 calendar conclusion.** Reweighting v4's OOF MASE to the test's
+**scale** distribution predicts the leaderboard almost exactly:
+
+| | pooled CV | reweighted to test scale mix | actual LB |
+|---|---|---|---|
+| group | 0.3497 | **0.4482** | **0.43715** |
+| time | 0.3584 | **0.4551** | **0.43715** |
+
+The proxy slightly over-predicts, so it is conservative. The cause:
+
+| | train (all offsets) | train (opening) | validation | **TEST** |
+|---|---|---|---|---|
+| scale <= 25 | 5.6% | 7.9% | 5.4% | **17.0%** |
+| scale <= 50 | 14.2% | 18.8% | 14.8% | **32.8%** |
+
+The test set holds **3x more small / partial-activity pairs**, and MASE divides by each pair's own
+`scale`, so those rows are intrinsically harder. v4's OOF MASE by bin: `2-5` -> **2.80**,
+`5-10` -> **1.72**, `>250` -> 0.27. Scale <= 50 is 32.8% of test rows and **53% of all error**.
+
+**Use the test-mix-weighted MASE as the selection metric from now on.** Every "CV gain did not
+transfer" episode since v1 traces back to selecting on a validation mix that does not match the
+test. This is the fix.
+
+#### The small bins are irreducible — confirmed, not assumed
+
+| bin | model | best constant | best constant per horizon |
+|-----|-------|---------------|---------------------------|
+| 2-5 | 2.8003 | 2.8546 | 2.8381 |
+| 5-10 | **1.7202** | **1.7124** | 1.7078 |
+
+At `5-10` the model is *worse than a constant*. True median is 0 with mean `|y|` of 2.85 — pairs
+that barely screened in D1-D3 then exploded. `FINDINGS.md` was right that this is irreducible;
+it is 21% of the weighted error and it is not recoverable.
+
+#### Oracles, reweighted to the test mix
+
+| | ceiling | headroom |
+|---|---|---|
+| oracle A — film-window curve known | 0.4397 | +0.0146 |
+| **oracle D — the pair's own 7-day total known** | **0.3389** | **+0.1153** |
+
+Oracle D keeps v4's per-day *shape* and replaces only the per-pair *level*, and lands below the
+leader. So the shape is right and the level is the problem. But the level is **not predictable**:
+a stage-1 model on the pair total reaches OOF MAE 2.2278 against a median target of 3.225, and
+using it scores **0.4720** vs 0.4543. Oracle A's headroom is also entirely in the two largest
+bins and *negative* in the small ones — which is exactly why `film_curve` hurt in round 4.
+
+#### v4's pipeline is verified correct
+
+- `scale` matches the competition definition on all 10,373 test pairs, **max abs diff 0**
+  (`(sum of D1-D3)/3`, clipped at 1; 7 pairs clipped).
+- `write_sub` is `floor(ratio * scale + 0.5)` — round half up, correct.
+- `test_history.csv` cannot supply a cluster-weekday profile: it is D1-D3 only, so Monday reads
+  0.02 and Tuesday is `NaN`. Structurally biased by the release calendar. Do not try it.
+
+#### Full experiment ledger (time scheme; WEIGHTED is the honest proxy)
+
+| experiment | plain | weighted | verdict |
+|---|---|---|---|
+| v4 baseline `H/P2/2.0` | 0.3577 | 0.4543 | — |
+| **featset `F` instead of `H`** | **0.3549** | **0.4526** | **KEEP, passes both schemes** |
+| **post-processing fitted on the weighted metric** | 0.3563 | **0.4499** | **KEEP, passes both schemes** |
+| `F/P4`, `H/P2/w_open=1` | ~0.356 | 0.4537 / 0.4546 | marginal |
+| featsets `E`, `G`; `w_open=3` | 0.362-0.366 | 0.459-0.467 | worse |
+| per-horizon separate models (v1's model H) | 0.3577 | 0.4547 | worse |
+| drop raw absolute level features | 0.3607 | 0.4588 | worse |
+| drop `scale` + `log_scale` | 0.3575 | 0.4542 | worse |
+| scale-reweighted *training* | 0.3621 | 0.4593 | worse |
+| weighted early stopping / `min_data_in_leaf=20` | worse | worse | worse |
+| two-stage pair-total model | 0.3764 | 0.4720 | much worse |
+| cross-film cluster x date in LightGBM | 0.3587 | 0.4572 | gate fail (helps group) |
+| sibling format variants | 0.3622 | — | gate fail |
+| `film_curve` stage 1 | 0.3618 | — | worse |
+| third model class in the blend | — | — | +0.0004 |
+| per-horizon multiplier, wide grid | +0.0000 | — | nothing |
+| per-scale-bin x p0-decile zero snap | 0.3582 | 0.4530 | worse, over-parameterised |
+
+Gate-passing total: **featset `F` (-0.0017 time / -0.0022 group) + weighted post-fit (-0.0023 time
+/ -0.0004 group) ~= -0.004**, i.e. roughly 0.437 -> **0.433** on the leaderboard. Real, verified,
+and far short of the 0.40 target.
+
+**Honest conclusion.** Sixteen experiments against a now-trustworthy proxy yield about -0.004.
+Reaching 0.375 needs something structurally different that is not in v4's formulation, and the
+cluster of seven teams inside 0.371-0.379 looks like a shared public approach rather than seven
+independent discoveries. That is the next thing to investigate, not another feature.
 
 ### The headline problem: CV gains are not transferring
 
