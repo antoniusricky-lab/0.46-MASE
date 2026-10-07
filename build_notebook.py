@@ -2215,6 +2215,363 @@ else:
 print(f"\n[CELL 18] {time.time() - t0:.1f}s")
 """)
 
+md(r"""
+## CELL 19 — re-select Sam's v5 under the weighted metric
+
+Reading `cinema_forecasting_v5.py` corrected two of my assumptions and opened the best
+opportunity so far.
+
+**What I had wrong.** `FEAT_F = v4.FEATSETS['F']  # v4's final feature set` — v4 already used
+featset **F**, not H. My `V4_FS = "H"` reconstruction was wrong, so round 6's "featset F beats H"
+was me fixing my own error, not improving on v4.
+
+**What v5 adds that my `submission_v5a.csv` lacks:** the **Nyepi fix** (`NOT_BOOSTED =
+['2026-03-19']` — `holidays.csv` calls it a public holiday, but Balinese Nyepi closes cinemas, so
+boosting it was backwards), incumbent features built from `train.csv` **and**
+`test_history.csv` together, and three new feature bundles (S shape, P incumbents, R long
+weekends) plus extra training windows and a lower learning rate.
+
+**What v5 dropped that my `submission_v5a.csv` has:** v5's `final()` is *five seeds of model A and
+nothing else* — no A/B blend, no `p0` zero classifier, no horizon multipliers. It threw away
+v4's entire post-processing stack, which is worth about 0.005 on the weighted proxy.
+
+That explains the scoreboard: `submission_v5.csv` 0.43255 is raw-model-plus-Nyepi, and
+`submission_v5a.csv` 0.43072 is post-processing-without-Nyepi. **They are complementary.**
+
+And critically, `experiments()` selects on `mean = (group + time) / 2` of **plain** MASE. We know
+plain CV under-weights the small-scale rows that are 32.8% of the test set, so Sam's bundle
+choices were made on the wrong objective. This cell re-runs that selection on the **weighted**
+metric and reports both, so we can see whether the choice actually changes.
+
+Every configuration is cached to `results/`, so the cell is resumable — stop and restart it
+freely. Budget 1-2 hours for a cold run, and note the table is larger than v4's (27 offsets
+instead of 18), so expect roughly 800k rows.
+""")
+code(r"""
+# CELL 19 — v5 BUNDLE SELECTION ON THE WEIGHTED METRIC (heavy, resumable)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import lightgbm as lgb
+    import v5_pipeline as P
+    v3, v4, v5 = P.load_modules_v5(".")
+    data, test = P.get_tables_v5(v3, v4, v5)
+    vp = P.release_mask(data)
+    w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+    folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+    BASE_ROWS = data.window.isin(v3.ALL_OFFSETS)
+    ALL_ROWS = pd.Series(True, index=data.index)
+    print(f"  clean rows: v4 windows {int((BASE_ROWS & ~data.bad).sum()):,} | "
+          f"with extra windows {int((~data.bad).sum()):,}")
+
+    line("V0  sanity: are the new v5 features comparable on train vs test?")
+    _pool = data[vp]
+    for c in v5.SHAPE + v5.PREV + v5.RUNS:
+        print(f"  {c:12s} train med {_pool[c].median():9.3f} (NaN {_pool[c].isna().mean():.2f})"
+              f" | test med {test[c].median():9.3f} (NaN {test[c].isna().mean():.2f})")
+
+    CATS = [c for c in v3.CAT_COLS]
+
+    def rcv(feats, params, rows, w_open, kind, folds_k):
+        # v5's run_cv plus v4's opening-window weighting and classifier mode
+        cats = [c for c in CATS if c in feats]
+        p = {**v3.PARAMS, **params}
+        if kind == "clf":
+            p.update(objective="binary", metric="binary_logloss")
+        tgt = (data.y == 0).astype(int) if kind == "clf" else data.y
+        wt = np.where(data.window.isin(v3.OPEN_OFFSETS), w_open, 1.0)
+        w_end = data.d1 + pd.Timedelta(days=9)
+        oof, iters = pd.Series(np.nan, index=data.index), []
+        for vm, purge in folds_k:
+            in_val = data.movie_title.isin(vm)
+            trm = rows & ~data.bad & ~in_val
+            if purge is not None:
+                trm &= ~((data.d1 <= purge[1]) & (w_end >= purge[0]))
+            vam = vp & in_val
+            dtr = lgb.Dataset(data.loc[trm, feats], tgt[trm], weight=wt[trm.to_numpy()],
+                              categorical_feature=cats)
+            dva = lgb.Dataset(data.loc[vam, feats], tgt[vam], categorical_feature=cats,
+                              reference=dtr)
+            m = lgb.train(p, dtr, 6000, valid_sets=[dva],
+                          callbacks=[lgb.early_stopping(100, verbose=False)])
+            iters.append(m.best_iteration)
+            oof[vam] = m.predict(data.loc[vam, feats], num_iteration=m.best_iteration)
+        return oof.dropna(), iters
+
+    def score(oof):
+        s = data.loc[oof.index]
+        e = np.abs(s.y - oof.clip(lower=0))
+        w = EW[data.index.get_indexer(oof.index)]
+        return float(e.mean()), float((e * w).sum() / w.sum())
+
+    LOG_PATH = OUT_DIR / "v5_weighted_log.json"
+    LOG = _json.loads(LOG_PATH.read_text()) if LOG_PATH.exists() else {}
+
+    def cv(name, feats, params, rows, w_open=2.0):
+        # cached per (name); returns dict with plain/weighted per scheme and the means
+        if name in LOG:
+            r = LOG[name]
+        else:
+            r = {}
+            for k in FOLD_KINDS:
+                _t = time.time()
+                o, it = rcv(feats, params, rows, w_open, "reg", folds[k])
+                pl, wg = score(o)
+                r[k] = dict(plain=pl, weighted=wg, iters=it)
+                pd.to_pickle(o, CACHE_DIR / f"v5oof_{name.replace(' ', '_')}_{k}.pkl")
+                print(f"    {name:30s} {k:5s} plain {pl:.5f} | WEIGHTED {wg:.5f} "
+                      f"({time.time() - _t:.0f}s)", flush=True)
+            r["mean_plain"] = np.mean([r[k]["plain"] for k in FOLD_KINDS])
+            r["mean_weighted"] = np.mean([r[k]["weighted"] for k in FOLD_KINDS])
+            r["feats"] = feats
+            r["params"] = params
+            r["rows"] = "all" if rows is ALL_ROWS else "base"
+            r["w_open"] = w_open
+            LOG[name] = r
+            LOG_PATH.write_text(_json.dumps(LOG, indent=1, default=float))
+        print(f"  {name:32s} mean plain {r['mean_plain']:.5f} | "
+              f"mean WEIGHTED {r['mean_weighted']:.5f}")
+        return r
+
+    line("V1  stage A: v4 baseline, then each new bundle, selected on WEIGHTED")
+    best_name, best_feats = "v4 (F, P2)", v5.FEAT_F
+    best = cv(best_name, v5.FEAT_F, v5.P2, BASE_ROWS)
+    single = {n: cv(f"F + {n}", v5.FEAT_F + b, v5.P2, BASE_ROWS)
+              for n, b in v5.BUNDLES.items()}
+    wins_w = [n for n in v5.BUNDLES if single[n]["mean_weighted"] < best["mean_weighted"]]
+    wins_p = [n for n in v5.BUNDLES if single[n]["mean_plain"] < best["mean_plain"]]
+    print(f"\n  bundles that help on WEIGHTED: {wins_w or 'none'}")
+    print(f"  bundles that help on PLAIN   : {wins_p or 'none'}"
+          f"{'   <-- the two metrics disagree' if set(wins_w) != set(wins_p) else ''}")
+    cands = {f"F + {n}": single[n] for n in wins_w}
+    if len(wins_w) > 1:
+        nm = "F + " + " + ".join(wins_w)
+        ft = v5.FEAT_F + [c for n in wins_w for c in v5.BUNDLES[n]]
+        cands[nm] = cv(nm, ft, v5.P2, BASE_ROWS)
+    if cands:
+        best_name = min(cands, key=lambda n: cands[n]["mean_weighted"])
+        best = cands[best_name]
+        best_feats = best["feats"]
+    print(f"  stage A choice: {best_name} (WEIGHTED {best['mean_weighted']:.5f})")
+
+    line("V2  stage B: extra training windows")
+    r = cv(best_name + " + windows", best_feats, v5.P2, ALL_ROWS)
+    rows_sel = ALL_ROWS if r["mean_weighted"] < best["mean_weighted"] else BASE_ROWS
+    if r["mean_weighted"] < best["mean_weighted"]:
+        best, best_name = r, best_name + " + windows"
+    print(f"  stage B choice: windows "
+          f"{'all' if rows_sel is ALL_ROWS else 'base'} (WEIGHTED {best['mean_weighted']:.5f})")
+
+    line("V3  stage C: learning rate 0.03, and stage D: opening-window weight")
+    params_sel = dict(v5.P2)
+    r = cv(best_name + " + lr003", best_feats, {**v5.P2, "learning_rate": 0.03}, rows_sel)
+    if r["mean_weighted"] < best["mean_weighted"]:
+        params_sel, best, best_name = {**v5.P2, "learning_rate": 0.03}, r, best_name + " + lr003"
+    wo_sel = 2.0
+    for wo in (1.0, 3.0):
+        r = cv(f"{best_name} + wopen{wo}", best_feats, params_sel, rows_sel, w_open=wo)
+        if r["mean_weighted"] < best["mean_weighted"]:
+            wo_sel, best, best_name = wo, r, f"{best_name} + wopen{wo}"
+    print(f"  final: {best_name}")
+    print(f"    params {params_sel} | windows {'all' if rows_sel is ALL_ROWS else 'base'} "
+          f"| w_open {wo_sel}")
+    print(f"    mean plain {best['mean_plain']:.5f} | mean WEIGHTED "
+          f"{best['mean_weighted']:.5f}")
+    print(f"    expected LB ~ {best['mean_weighted'] - 0.009:.4f} "
+          f"(group proxy minus the calibrated 0.009 offset)")
+
+    _choice = dict(name=best_name, feats=best_feats, params=params_sel,
+                   rows="all" if rows_sel is ALL_ROWS else "base", w_open=wo_sel,
+                   iters_group=best["group"]["iters"], mean_weighted=best["mean_weighted"],
+                   mean_plain=best["mean_plain"])
+    (OUT_DIR / "v5_choice_weighted.json").write_text(_json.dumps(_choice, indent=1, default=float))
+    print(f"\n  wrote results/v5_choice_weighted.json -> CELL 20 reads this")
+print(f"\n[CELL 19] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 20 — the combined submission: v5's table + v4's post-processing
+
+`submission_v5.csv` (0.43255) is raw model A plus the Nyepi fix, with no post-processing.
+`submission_v5a.csv` (0.43072) is the full post-processing stack without the Nyepi fix. This cell
+puts the two halves together on whatever CELL 19 selected, and adds the one post-processing
+change that passed the gate in CELL 17:
+
+- **P3's single zero threshold** (`predict 0 iff p0 > t`) instead of v4's ten per-decile
+  multipliers, worth +0.0011 group / +0.0012 time;
+- the blend weight and horizon multipliers fitted on the **weighted** objective;
+- Nyepi, concatenated incumbents and any winning bundles, inherited from v5's tables.
+
+Writes `submission_v5c.csv`. Expected LB is printed from the calibrated offset, but treat it as a
+hypothesis: offline deltas have transferred at roughly 55%.
+""")
+code(r"""
+# CELL 20 — submission_v5c.csv (needs CELL 19's choice)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import lightgbm as lgb
+    import v5_pipeline as P
+    _cp = OUT_DIR / "v5_choice_weighted.json"
+    if not _cp.exists():
+        print("results/v5_choice_weighted.json missing -> run CELL 19 first")
+    else:
+        ch = _json.loads(_cp.read_text())
+        v3, v4, v5 = P.load_modules_v5(".", verbose=False)
+        data, test = P.get_tables_v5(v3, v4, v5, verbose=False)
+        vp = P.release_mask(data)
+        w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+        folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+        feats, params = ch["feats"], ch["params"]
+        rows = (pd.Series(True, index=data.index) if ch["rows"] == "all"
+                else data.window.isin(v3.ALL_OFFSETS))
+        wo = ch["w_open"]
+        cats = [c for c in v3.CAT_COLS if c in feats]
+        print(f"  chosen: {ch['name']}")
+        print(f"    {len(feats)} feats | params {params} | windows {ch['rows']} | w_open {wo}")
+        print(f"    mean WEIGHTED {ch['mean_weighted']:.5f}")
+
+        line("C1  OOF for A, B and the zero classifier on the chosen configuration")
+
+        def rcv(pp, kind, folds_k):
+            p = {**v3.PARAMS, **pp}
+            if kind == "clf":
+                p.update(objective="binary", metric="binary_logloss")
+            tgt = (data.y == 0).astype(int) if kind == "clf" else data.y
+            wt = np.where(data.window.isin(v3.OPEN_OFFSETS), wo, 1.0)
+            w_end = data.d1 + pd.Timedelta(days=9)
+            oof, iters = pd.Series(np.nan, index=data.index), []
+            for vm, purge in folds_k:
+                in_val = data.movie_title.isin(vm)
+                trm = rows & ~data.bad & ~in_val
+                if purge is not None:
+                    trm &= ~((data.d1 <= purge[1]) & (w_end >= purge[0]))
+                vam = vp & in_val
+                dtr = lgb.Dataset(data.loc[trm, feats], tgt[trm], weight=wt[trm.to_numpy()],
+                                  categorical_feature=cats)
+                dva = lgb.Dataset(data.loc[vam, feats], tgt[vam], categorical_feature=cats,
+                                  reference=dtr)
+                m = lgb.train(p, dtr, 6000, valid_sets=[dva],
+                              callbacks=[lgb.early_stopping(100, verbose=False)])
+                iters.append(m.best_iteration)
+                oof[vam] = m.predict(data.loc[vam, feats], num_iteration=m.best_iteration)
+            return oof.dropna(), iters
+
+        SPEC = {"A": (params, "reg", 5), "B": (v4.PARAMS_B, "reg", 3),
+                "p0": (params, "clf", 3)}
+        OO, ITERS = {}, {}
+        for nm, (pp, kd, _) in SPEC.items():
+            OO[nm], it = {}, []
+            for kind in FOLD_KINDS:
+                _c = CACHE_DIR / f"v5c_{nm}_{kind}.pkl"
+                _ci = OUT_DIR / f"v5c_iters_{nm}_{kind}.json"
+                if _c.exists() and _ci.exists():
+                    OO[nm][kind] = pd.read_pickle(_c)
+                    it += _json.loads(_ci.read_text())
+                else:
+                    _t = time.time()
+                    o, i = rcv(pp, kd, folds[kind])
+                    OO[nm][kind] = o
+                    pd.to_pickle(o, _c)
+                    _ci.write_text(_json.dumps(i))
+                    it += i
+                    print(f"    {nm} [{kind}] {time.time() - _t:.0f}s", flush=True)
+            ITERS[nm] = max(50, int(1.1 * np.mean(it)))   # v5 scales rounds by 1.1x
+        print(f"  rounds for the full-data refit (1.1x the CV mean): {ITERS}")
+
+        line("C2  fit post-processing: weighted objective + P3's single zero threshold")
+        TH = np.round(np.arange(0.30, 0.901, 0.02), 2)
+
+        def build(kind):
+            idx = OO["A"][kind].index
+            fr = pd.DataFrame({"y": data.y.loc[idx], "A": OO["A"][kind].clip(lower=0),
+                               "B": OO["B"][kind].clip(lower=0), "p0": OO["p0"][kind].loc[idx],
+                               "h": data.h.loc[idx], "sb": sb.loc[idx],
+                               "mv": data.movie_title.loc[idx]})
+            fr["w"] = w_eval[fr.sb.to_numpy()]
+            return fr
+
+        frames = {k: build(k) for k in FOLD_KINDS}
+
+        def fit_v5c(fr):
+            # blend + horizon multipliers on the weighted objective, then ONE zero threshold
+            y, ww = fr.y.to_numpy(), fr.w.to_numpy()
+            bf = lambda g, er: g[int(np.argmin([er(x) for x in g]))]
+            a, b = fr.A.to_numpy(), fr.B.to_numpy()
+            w0 = bf(v4.W_GRID, lambda w: (ww * np.abs(y - w * a - (1 - w) * b)).sum())
+            r = w0 * a + (1 - w0) * b
+            hm = {}
+            for k in v3.HORIZONS:
+                m = fr.h.to_numpy() == k
+                if m.sum():
+                    hm[k] = bf(v4.H_GRID, lambda g: (ww[m] * np.abs(y[m] - g * r[m])).sum())
+            r = r * pd.Series(fr.h.to_numpy()).map(hm).fillna(1.0).to_numpy()
+            th = bf(TH, lambda t: (ww * np.abs(
+                y - np.where(fr.p0.to_numpy() > t, 0.0, r))).sum())
+            return dict(w=float(w0), hm=hm, th=float(th))
+
+        def apply_v5c(fr, pp):
+            r = pp["w"] * fr.A.to_numpy() + (1 - pp["w"]) * fr.B.to_numpy()
+            r = r * pd.Series(fr.h.to_numpy()).map(pp["hm"]).fillna(1.0).to_numpy()
+            return np.clip(np.where(fr.p0.to_numpy() > pp["th"], 0.0, r), 0, None)
+
+        for kind, fr in frames.items():
+            raw = float((fr.w * np.abs(fr.y - fr.A)).sum() / fr.w.sum())
+            num = den = 0.0
+            for vm, _ in folds[kind]:
+                m = fr.mv.isin(vm)
+                va, tr = fr[m], fr[~m]
+                if not len(va) or not len(tr):
+                    continue
+                e = np.abs(va.y.to_numpy() - apply_v5c(va, fit_v5c(tr)))
+                num += (va.w.to_numpy() * e).sum()
+                den += va.w.to_numpy().sum()
+            print(f"  [{kind}] raw A {raw:.4f} -> post-processed {num / den:.4f}"
+                  f"   gain {raw - num / den:+.4f}")
+        post = fit_v5c(pd.concat(frames.values()))
+        print(f"\n  shipped: blend A {post['w']:.2f} | zero threshold p0 > {post['th']:.2f}")
+        print(f"    horizon multipliers {post['hm']}")
+
+        line("C3  train on all clean windows and write submission_v5c.csv")
+        trm = rows & ~data.bad
+        wt = np.where(data.window.isin(v3.OPEN_OFFSETS), wo, 1.0)[trm.to_numpy()]
+        preds = {}
+        for nm, (pp, kd, nseed) in SPEC.items():
+            p = {**v3.PARAMS, **pp}
+            if kd == "clf":
+                p.update(objective="binary", metric="binary_logloss")
+            tgt = (data.y == 0).astype(int) if kd == "clf" else data.y
+            ds = lgb.Dataset(data.loc[trm, feats], tgt[trm], weight=wt,
+                             categorical_feature=cats)
+            off = {"A": 0, "B": 100, "p0": 200}[nm]
+            ms = [lgb.train({**p, "seed": SEED + off + i}, ds, ITERS[nm]) for i in range(nseed)]
+            preds[nm] = np.mean([m.predict(test[feats]) for m in ms], axis=0)
+            print(f"    {nm}: {nseed} seeds x {ITERS[nm]} rounds", flush=True)
+        tf = pd.DataFrame({"A": np.clip(preds["A"], 0, None),
+                           "B": np.clip(preds["B"], 0, None),
+                           "p0": preds["p0"], "h": test.h.to_numpy()})
+        ratio = apply_v5c(tf, post)
+        _hist = (test.t1.fillna(0) + test.t2.fillna(0) + test.t3.fillna(0)).to_numpy()
+        ratio[_hist == 0] = 0
+        v4.write_sub("submission_v5c.csv", test, ratio, test.scale.to_numpy())
+        for _ref in ("submission_v5a.csv", "submission_v5.csv"):
+            if Path(_ref).exists():
+                _o = pd.read_csv(_ref).total_ticket.to_numpy()
+                _n = pd.read_csv("submission_v5c.csv").total_ticket.to_numpy()
+                print(f"  vs {_ref}: differs on {(_o != _n).mean():.1%} of rows | "
+                      f"totals {_o.sum():,} -> {_n.sum():,} | zeros "
+                      f"{(_o == 0).mean():.1%} -> {(_n == 0).mean():.1%}")
+        print(f"\n  SUBMIT submission_v5c.csv | expected LB ~ "
+              f"{ch['mean_weighted'] - 0.009:.4f} before post-processing credit")
+print(f"\n[CELL 20] {time.time() - t0:.1f}s")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG

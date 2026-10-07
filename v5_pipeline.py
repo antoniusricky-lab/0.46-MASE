@@ -89,6 +89,68 @@ def load_modules(data_dir=".", cache_dir=CACHE_DIR, verbose=True):
     return v3, v4
 
 
+def load_modules_v5(data_dir=".", cache_dir=CACHE_DIR, verbose=True):
+    """Also import Sam's cinema_forecasting_v5.py. Returns (v3, v4, v5).
+
+    v5 does `import cinema_forecasting_v4 as v4`, so 0.43715.py has to be importable
+    under that exact name; this stages a copy rather than renaming the original.
+    """
+    v3, v4 = load_modules(data_dir, cache_dir, verbose)
+    d = Path(data_dir)
+    v4_alias = d / "cinema_forecasting_v4.py"
+    if not v4_alias.exists():
+        shutil.copyfile(d / "0.43715.py", v4_alias)
+        if verbose:
+            print("  copied 0.43715.py -> cinema_forecasting_v4.py (v5 imports that name)")
+    sys.modules["cinema_forecasting_v4"] = v4
+    v5_path = d / "cinema_forecasting_v5.py"
+    if not v5_path.exists():
+        alt = sorted(d.glob("cinema_forecasting_v5*.py"))
+        if not alt:
+            raise FileNotFoundError("cinema_forecasting_v5.py not found")
+        shutil.copyfile(alt[0], v5_path)
+        if verbose:
+            print(f"  copied {alt[0].name} -> cinema_forecasting_v5.py")
+    v5 = _load_module(v5_path, "cinema_forecasting_v5")
+    if verbose:
+        print(f"  v5 imported | EXTRA_OFFSETS {v5.EXTRA_OFFSETS} | "
+              f"bundles {list(v5.BUNDLES)} | NOT_BOOSTED {v5.NOT_BOOSTED}")
+    return v3, v4, v5
+
+
+def get_tables_v5(v3, v4, v5, offsets=None, cache_dir=CACHE_DIR, tag="v5all",
+                  rebuild=False, verbose=True):
+    """Build (or load) Sam v5's training-window and test tables.
+
+    v5's test table carries the Nyepi calendar fix (NOT_BOOSTED) and builds the
+    incumbent features from train.csv and test_history.csv together, neither of which
+    v4's tables have.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(exist_ok=True)
+    offsets = list(v3.ALL_OFFSETS) + list(v5.EXTRA_OFFSETS) if offsets is None else list(offsets)
+    f_data, f_test = cache_dir / f"{tag}_window.pkl", cache_dir / f"{tag}_test.pkl"
+    if not rebuild and f_data.exists() and f_test.exists():
+        data, test = pd.read_pickle(f_data), pd.read_pickle(f_test)
+        if verbose:
+            print(f"  v5 tables from cache: train {data.shape} | test {test.shape}")
+    else:
+        if verbose:
+            print(f"  building v5 tables for {len(offsets)} offsets "
+                  f"(this is the slow part) ...", flush=True)
+        data, ctx = v5.load_table(offsets)
+        test = v5.load_test(ctx)
+        v3.encode_cats([data, test])      # one call, both frames
+        data.to_pickle(f_data)
+        test.to_pickle(f_test)
+        if verbose:
+            print(f"  v5 tables built: train {data.shape} | test {test.shape}")
+    for c in v3.CAT_COLS:
+        assert list(data[c].cat.categories) == list(test[c].cat.categories), (
+            f"category codes for {c} differ - delete {f_data} and {f_test} and rebuild")
+    return data, test
+
+
 def get_tables(v3, v4, cache_dir=CACHE_DIR, rebuild=False, verbose=True):
     """Build (or load) the 545k training-window table and the aligned test table.
 
