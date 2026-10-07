@@ -2496,6 +2496,14 @@ else:
         print(f"  chosen: {ch['name']}")
         print(f"    {len(feats)} feats | params {params} | windows {ch['rows']} | w_open {wo}")
         print(f"    mean WEIGHTED {ch['mean_weighted']:.5f}")
+        # Cache files must be keyed on the CONFIGURATION, not just the model name.
+        # Keyed on the name alone, re-running after CELL 19 picks a different config
+        # would silently reuse the previous config's OOF and write a wrong submission.
+        import hashlib
+        CFG = hashlib.md5(_json.dumps(
+            [sorted(feats), sorted(params.items()), ch["rows"], wo], default=str
+        ).encode()).hexdigest()[:12]
+        print(f"    config fingerprint {CFG} (cache files are tagged with it)")
 
         line("C1  OOF for A, B and the zero classifier on the chosen configuration")
 
@@ -2529,8 +2537,8 @@ else:
         for nm, (pp, kd, _) in SPEC.items():
             OO[nm], it = {}, []
             for kind in FOLD_KINDS:
-                _c = CACHE_DIR / f"v5c_{nm}_{kind}.pkl"
-                _ci = OUT_DIR / f"v5c_iters_{nm}_{kind}.json"
+                _c = CACHE_DIR / f"v5c_{CFG}_{nm}_{kind}.pkl"
+                _ci = OUT_DIR / f"v5c_iters_{CFG}_{nm}_{kind}.json"
                 if _c.exists() and _ci.exists():
                     OO[nm][kind] = pd.read_pickle(_c)
                     it += _json.loads(_ci.read_text())
