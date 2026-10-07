@@ -1932,6 +1932,289 @@ else:
 print(f"\n[CELL 16] {time.time() - t0:.1f}s")
 """)
 
+md(r"""
+## CELL 17 — the p0 classifier, and what the showtime oracle really measures
+
+CELL 16's R2 looked like the best remaining lever (-0.041 from knowing future showtimes), but it
+is **confounded**: 31.4% of rows have `shw_future = 0`, and the oracle predicts exactly 0 there.
+So an unknown share of that gain is simply *knowing which rows are zero* — Oracle B in disguise,
+and model Z already proved chasing zero-knowledge costs 0.05-0.07 on the leaderboard. **P1**
+splits the oracle into its zero-state part and its level part. If it is mostly the former, the
+showtime idea is dead and we stop.
+
+The rest targets the component doing the most work. Your W3 output fitted zero multipliers of
+`[1.05, 1.1, 1.2, 1.2, 0.95, 0.4, 0.0, 0.0, 0.0, 0.0]`, i.e. the top four `p0` deciles are zeroed
+outright. That classifier decides roughly 29% of the submission, yet it is trained with the
+*regressor's* featset and paramset and early-stops at ~116 rounds. It has never been tuned.
+
+- **P2** tunes it across v4's paramsets, scoring the **post-processed weighted** objective, which
+  is what actually matters, rather than AUC.
+- **P3** replaces the ten decile multipliers with one fitted threshold (`predict 0 iff p0 > t`).
+  R1 just showed this pipeline punishes over-parameterisation, so fewer knobs may generalise
+  better.
+- **P4** checks whether the final model under-trains. `train_full` uses the CV mean
+  `best_iteration` (332 for A) but trains on ~25% more rows than any fold, so the optimum should
+  be higher. Rather than apply the usual 1.25x rule blindly, P4 measures how `best_iteration`
+  grows with training-set size and extrapolates.
+
+P2 retrains classifiers, so budget ~10 min. P1, P3 and P4 reuse CELL 14's caches.
+""")
+code(r"""
+# CELL 17 — p0 CLASSIFIER TUNING + ORACLE DECOMPOSITION
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import v5_pipeline as P
+    v3, v4 = P.load_modules(".", verbose=False)
+    data, test = P.get_tables(v3, v4, verbose=False)
+    vp = P.release_mask(data)
+    w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+    folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+    feats = v4.FEATSETS[V5_FS]
+
+    def load_frame(kind, p0_name="p0"):
+        need = {"A": f"oofF_A_{kind}.pkl", "B": f"oofF_B_{kind}.pkl",
+                "p0": f"oofF_{p0_name}_{kind}.pkl"}
+        if not all((CACHE_DIR / f).exists() for f in need.values()):
+            return None
+        O = {n: pd.read_pickle(CACHE_DIR / f) for n, f in need.items()}
+        idx = O["A"].index
+        fr = pd.DataFrame({"y": data.y.loc[idx], "A": O["A"].clip(lower=0),
+                           "B": O["B"].clip(lower=0), "p0": O["p0"].loc[idx],
+                           "h": data.h.loc[idx], "sb": sb.loc[idx],
+                           "mv": data.movie_title.loc[idx], "scale": data.scale.loc[idx]})
+        fr["w"] = w_eval[fr.sb.to_numpy()]
+        return fr
+
+    def cf_post(fr, kind, weighted=True):
+        # cross-fitted weighted MASE of v4's post-processing recipe
+        num = den = 0.0
+        for vm, _ in folds[kind]:
+            m = fr.mv.isin(vm)
+            va, tr = fr[m], fr[~m]
+            if not len(va) or not len(tr):
+                continue
+            r = P.apply_post(va, P.fit_post_weighted(tr, v3, v4, weighted), v4)
+            e = np.abs(va.y.to_numpy() - np.clip(r, 0, None))
+            num += (va.w.to_numpy() * e).sum()
+            den += va.w.to_numpy().sum()
+        return num / den
+
+    base = {}
+    for kind in FOLD_KINDS:
+        fr = load_frame(kind)
+        if fr is None:
+            print(f"[{kind}] missing cached OOF -> run CELL 14 first")
+            continue
+        base[kind] = (fr, cf_post(fr, kind))
+        print(f"  [{kind}] baseline post-processed WEIGHTED {base[kind][1]:.4f}")
+    if not base:
+        print("nothing cached; stop here")
+    else:
+        # ---------------------------------------------- P1 decompose the oracle
+        line("P1  the showtime oracle: how much is just knowing the zero state?")
+        _tr = pd.read_csv(Path(v3.DATA) / "train.csv", parse_dates=["date_show"])
+        _sh = _tr.groupby(["movie_title", "cinema_ids", "date_show"], as_index=False).agg(
+            shw_future=("total_show", "sum"))
+        _sh["_mt"] = _sh.movie_title.astype(str)
+        _sh["_ci"] = _sh.cinema_ids.astype(str)
+        kind0 = next(iter(base))
+        fr0 = base[kind0][0]
+        s = data.loc[fr0.index].copy()
+        s["_mt"] = s.movie_title.astype(str)
+        s["_ci"] = s.cinema_ids.astype(str)
+        s = s.merge(_sh[["_mt", "_ci", "date_show", "shw_future"]],
+                    on=["_mt", "_ci", "date_show"], how="left")
+        s["shw_future"] = s.shw_future.fillna(0.0)
+        s.index = fr0.index
+        # v4's own post-processed prediction, cross-fitted, as the reference level
+        rv4 = np.full(len(fr0), np.nan)
+        pos = {ix: i for i, ix in enumerate(fr0.index)}
+        for vm, _ in folds[kind0]:
+            m = fr0.mv.isin(vm)
+            va, tr = fr0[m], fr0[~m]
+            if not len(va) or not len(tr):
+                continue
+            r = np.clip(P.apply_post(va, P.fit_post_weighted(tr, v3, v4, True), v4), 0, None)
+            for ix, val in zip(va.index, r):
+                rv4[pos[ix]] = val
+        ok = ~np.isnan(rv4)
+        y = fr0.y.to_numpy()
+        w = fr0.w.to_numpy()
+        tps3 = np.where(s.shw3.to_numpy() > 0,
+                        s.t3.to_numpy() / np.maximum(s.shw3.to_numpy(), 1e-9), 0.0)
+        lvl = s.shw_future.to_numpy() * tps3 / s.scale.to_numpy()
+        screens = s.shw_future.to_numpy() > 0
+        truly_zero = y == 0
+
+        def wm(pred):
+            m = ok
+            return float((w[m] * np.abs(y[m] - pred[m])).sum() / w[m].sum())
+
+        variants = {
+            "v4 post-processed (reference)": rv4,
+            "ORACLE full: shows x D3 tps": lvl,
+            "ORACLE zero-state only: v4 level, zeroed where it did not screen":
+                np.where(screens, rv4, 0.0),
+            "ORACLE level only: oracle where it screened, v4 elsewhere":
+                np.where(screens, lvl, rv4),
+            "ORACLE B (knows y == 0 exactly), v4 level elsewhere":
+                np.where(truly_zero, 0.0, rv4),
+        }
+        for nm, pr in variants.items():
+            print(f"  {nm:62s} {wm(np.asarray(pr, dtype=float)):.4f}")
+        print("\n  Compare 'zero-state only' with 'level only'. If zero-state captures most of")
+        print("  the full oracle's gain, the showtime idea is really the zero oracle, which")
+        print("  model Z already proved is unsafe under time shift. If 'level only' carries it,")
+        print("  a showtime sub-model is worth building.")
+
+        # -------------------------------------------- P2 tune the p0 classifier
+        line("P2  is the p0 classifier under-tuned? (scored on the post-processed objective)")
+        P0_CFGS = {"P2 (current)": v4.PARAMSETS["P2"], "P1 shallow": v4.PARAMSETS["P1"],
+                   "P3 regularised": v4.PARAMSETS["P3"], "P4 feat-frac": v4.PARAMSETS["P4"],
+                   "P0 v3 default": v4.PARAMSETS["P0"]}
+        for kind in base:
+            print(f"  [{kind}]")
+            for nm, pp in P0_CFGS.items():
+                tag = nm.split()[0]
+                _c = CACHE_DIR / f"oofF_p0{tag}_{kind}.pkl"
+                if _c.exists():
+                    o = pd.read_pickle(_c)
+                else:
+                    _t = time.time()
+                    o, _ = v4.run_cv(data, feats, folds[kind], pp, w_open=V4_WOPEN, kind="clf")
+                    pd.to_pickle(o, _c)
+                    print(f"    (trained {nm} in {time.time() - _t:.0f}s)", flush=True)
+                fr = base[kind][0].copy()
+                fr["p0"] = o.loc[fr.index].to_numpy()
+                sc = cf_post(fr, kind)
+                print(f"    {nm:16s} WEIGHTED {sc:.4f}   "
+                      f"{'*** better' if sc < base[kind][1] - 1e-6 else ''}")
+
+        # ------------------------- P3 one threshold instead of ten multipliers
+        line("P3  single zero threshold vs v4's ten decile multipliers")
+        TH = np.round(np.arange(0.30, 0.901, 0.02), 2)
+        for kind in base:
+            fr, b = base[kind]
+            num = den = 0.0
+            picks = []
+            for vm, _ in folds[kind]:
+                m = fr.mv.isin(vm)
+                va, tr = fr[m], fr[~m]
+                if not len(va) or not len(tr):
+                    continue
+                # blend + horizon multipliers come from the usual fit; only the zero step changes
+                pt = P.fit_post_weighted(tr, v3, v4, True)
+                pt_nozero = {"w": pt["w"], "zm": np.ones(10), "hm": pt["hm"]}
+                rt = np.clip(P.apply_post(tr, pt_nozero, v4), 0, None)
+                best, bt = None, 0.5
+                for t in TH:
+                    cand = np.where(tr.p0.to_numpy() > t, 0.0, rt)
+                    v = float((tr.w.to_numpy() * np.abs(tr.y.to_numpy() - cand)).sum())
+                    if best is None or v < best:
+                        best, bt = v, t
+                picks.append(bt)
+                rv = np.clip(P.apply_post(va, pt_nozero, v4), 0, None)
+                cand = np.where(va.p0.to_numpy() > bt, 0.0, rv)
+                num += (va.w.to_numpy() * np.abs(va.y.to_numpy() - cand)).sum()
+                den += va.w.to_numpy().sum()
+            print(f"  [{kind}] thresholds {picks} | WEIGHTED {num / den:.4f} vs "
+                  f"v4 deciles {b:.4f}   gain {b - num / den:+.4f}")
+
+        # --------------------- P4 does the final model train for enough rounds?
+        line("P4  best_iteration vs training-set size - does train_full under-train?")
+        print("  v4 passes the CV mean best_iteration straight to train_full, but train_full")
+        print("  fits ~25% more rows than any single fold, so the optimum should be higher.")
+        pool = data[vp]
+        for nfold in (3, 5, 10):
+            _c = OUT_DIR / f"iters_sizecurve_{nfold}.json"
+            if _c.exists():
+                mi = _json.loads(_c.read_text())
+            else:
+                from sklearn.model_selection import GroupKFold
+                mvs = pool.drop_duplicates("movie_title")[["movie_title"]]
+                fl = [(set(mvs.movie_title.iloc[b]), None) for _, b in
+                      GroupKFold(nfold).split(mvs, groups=mvs.movie_title)]
+                _, it = v4.run_cv(data, feats, fl, v4.PARAMSETS[V4_PS], w_open=V4_WOPEN)
+                mi = [int(np.mean(it)), float(1 - 1 / nfold)]
+                _c.write_text(_json.dumps(mi))
+            print(f"    {nfold:2d}-fold: trains on {mi[1]:.0%} of movies -> "
+                  f"mean best_iteration {mi[0]}", flush=True)
+        print("\n  If best_iteration rises with training size, scale the final round count by")
+        print("  the same trend extrapolated to 100% instead of using the 5-fold mean.")
+print(f"\n[CELL 17] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 18 — blend an external submission
+
+The one source of error decorrelation never tested: a **separately built pipeline**. CELL 13's
+0.972 error correlation was measured across model *classes sharing one feature set*, which is a
+much weaker form of diversity than two people building different pipelines.
+
+There are no test labels, so this cannot be validated offline — it is an LB probe. What the cell
+*can* do is report whether the two submissions disagree enough for a blend to be worth a
+submission at all: if they agree on almost every row, skip it.
+
+For MAE with two predictors the average is the natural combiner (the median of two points is
+their mean). Set `BLEND_FILES` to the submissions you want to combine.
+""")
+code(r"""
+# CELL 18 — BLEND EXTERNAL SUBMISSIONS (writes submission_v5b.csv)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+# edit this: the files to blend, and the weight on the FIRST one
+BLEND_FILES = ["submission_v5a.csv", "submission_v4_sam.csv"]
+BLEND_W = 0.5
+
+_have = [f for f in BLEND_FILES if Path(f).exists()]
+if len(_have) < 2:
+    print(f"need at least two submissions; found {_have}")
+    print(f"missing: {[f for f in BLEND_FILES if f not in _have]}")
+    print("Put the other team member's submission beside the notebook and set BLEND_FILES.")
+else:
+    subs = {f: pd.read_csv(f) for f in _have}
+    ids = None
+    for f, d in subs.items():
+        assert {"id", "total_ticket"} <= set(d.columns), f"{f} is not a submission csv"
+        if ids is None:
+            ids = d.id
+        assert d.id.equals(ids), f"{f} has a different id order"
+    line("B1  how much do they actually disagree?")
+    import itertools
+    for a, b in itertools.combinations(_have, 2):
+        x, y = subs[a].total_ticket.to_numpy(), subs[b].total_ticket.to_numpy()
+        diff = x != y
+        rel = np.abs(x - y) / np.maximum((x + y) / 2, 1)
+        print(f"  {Path(a).name} vs {Path(b).name}")
+        print(f"    rows differing {diff.mean():6.1%} | median relative gap on those "
+              f"{np.median(rel[diff]) if diff.any() else 0:.3f}")
+        print(f"    totals {x.sum():,} vs {y.sum():,} | zeros {(x == 0).mean():.1%} vs "
+              f"{(y == 0).mean():.1%} | corr {np.corrcoef(x, y)[0, 1]:.4f}")
+    print("\n  Rows differing below ~20% means the blend cannot move the score much; skip it.")
+
+    line("B2  write the blend")
+    f0, f1 = _have[0], _have[1]
+    x, y = subs[f0].total_ticket.to_numpy(float), subs[f1].total_ticket.to_numpy(float)
+    blend = np.floor(BLEND_W * x + (1 - BLEND_W) * y + 0.5).astype(int)
+    out = pd.DataFrame({"id": ids, "total_ticket": np.clip(blend, 0, None)})
+    out.to_csv("submission_v5b.csv", index=False)
+    print(f"  wrote submission_v5b.csv: {BLEND_W:.2f} x {Path(f0).name} + "
+          f"{1 - BLEND_W:.2f} x {Path(f1).name}")
+    print(f"  mean {out.total_ticket.mean():.1f} tickets | zeros "
+          f"{(out.total_ticket == 0).mean():.1%} | total {out.total_ticket.sum():,}")
+    print(f"  differs from {Path(f0).name} on "
+          f"{(out.total_ticket.to_numpy() != x).mean():.1%} of rows")
+    print("\n  This is an LB probe: there are no labels to validate it offline. If the blend")
+    print("  beats both inputs, the two pipelines are genuinely decorrelated and a weighted")
+    print("  blend is worth one more probe to tune BLEND_W.")
+print(f"\n[CELL 18] {time.time() - t0:.1f}s")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
