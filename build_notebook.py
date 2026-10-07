@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 11
+NB_VERSION = 12
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -2709,30 +2709,30 @@ else:
         ratio = apply_v5c(tf, post)
         _hist = (test.t1.fillna(0) + test.t2.fillna(0) + test.t3.fillna(0)).to_numpy()
         ratio[_hist == 0] = 0
-        # Write a fingerprinted file FIRST so a run can never destroy a good submission,
-        # then promote it to submission_v5c.csv only if its proxy is at least as good as
-        # whatever that name currently holds (tracked in results/submission_ledger.json).
+        # NEVER write submission_v5c.csv. A promotion rule cannot know about files you
+        # swapped in by hand, and it twice destroyed a better submission. Every run writes
+        # only its own fingerprinted file; the ledger ranks them and you choose.
         _cfg_label = ch.get("cfg_label", ch.get("name", "?"))
         _fn = f"submission_v5c_{CFG}.csv"
         v4.write_sub(_fn, test, ratio, test.scale.to_numpy())
         _ledger_p = OUT_DIR / "submission_ledger.json"
         _ledger = _json.loads(_ledger_p.read_text()) if _ledger_p.exists() else {}
-        _this = float(post_group)
-        _cur = _ledger.get("submission_v5c.csv", {}).get("group_post")
-        _ledger[_fn] = dict(group_post=_this, config=_cfg_label, fingerprint=CFG)
-        if _cur is None or _this <= _cur + 1e-9:
-            import shutil as _sh
-            _sh.copyfile(_fn, "submission_v5c.csv")
-            _ledger["submission_v5c.csv"] = dict(group_post=_this, config=_cfg_label,
-                                                 fingerprint=CFG)
-            print(f"  promoted {_fn} -> submission_v5c.csv "
-                  f"(group post-processed {_this:.4f}"
-                  f"{f', previous {_cur:.4f}' if _cur is not None else ''})")
-        else:
-            print(f"  NOT promoted: this config's group post-processed {_this:.4f} is WORSE "
-                  f"than the {_cur:.4f} already behind submission_v5c.csv.")
-            print(f"  The better file is untouched. This run is saved as {_fn} only.")
+        _ledger[_fn] = dict(group_post=float(post_group),
+                            expected_lb=round(float(post_group) - 0.0087, 5),
+                            config=_cfg_label, fingerprint=CFG,
+                            lb=_ledger.get(_fn, {}).get("lb"))
         _ledger_p.write_text(_json.dumps(_ledger, indent=1, default=float))
+
+        line("C4  every submission built so far, best expected LB first")
+        _rows = []
+        for _k, _v in _ledger.items():
+            _rows.append(dict(file=_k, expected_lb=_v.get("expected_lb"),
+                              actual_lb=_v.get("lb"), config=str(_v.get("config"))[:46]))
+        _tab = pd.DataFrame(_rows).sort_values("expected_lb", na_position="last")
+        print(_tab.to_string(index=False))
+        print(f"\n  SUBMIT THIS FILE: {_tab.file.iloc[0]}")
+        print("  Record a real score by putting it in results/submission_ledger.json as")
+        print('  "lb": 0.42677 for that file, so the table below stays honest.')
         for _ref in ("submission_v5a.csv", "submission_v5.csv"):
             if Path(_ref).exists():
                 _o = pd.read_csv(_ref).total_ticket.to_numpy()
@@ -2741,8 +2741,6 @@ else:
                       f"totals {_o.sum():,} -> {_n.sum():,} | zeros "
                       f"{(_o == 0).mean():.1%} -> {(_n == 0).mean():.1%}")
         print(f"\n  expected LB for THIS config: {post_group - 0.0087:.4f}")
-        print("  Submit submission_v5c.csv only if the promotion line above says it was")
-        print("  promoted; otherwise the previous file is better and is still in place.")
 print(f"\n[CELL 20] {time.time() - t0:.1f}s")
 """)
 
@@ -2950,6 +2948,152 @@ else:
             print("\n  Any ACCEPT here is a real both-scheme win; add it to the chosen params")
             print("  in results/v5_choice_weighted.json and re-run CELL 20.")
 print(f"\n[CELL 21] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 22 — chase `feature_fraction` on the correct base configuration
+
+CELL 21 R2 produced the first substantial both-scheme win in several rounds:
+
+```
+feature_fraction 0.5     group +0.00383 | time +0.00180  -> ACCEPT
+cat_smooth 50            group +0.00063 | time +0.00054  -> ACCEPT
+```
+
+Two reasons to push on `feature_fraction` specifically. It was measured against the **wrong base**
+(`windows all`, which the repaired gate rejects), so it needs re-measuring on `windows base`. And
+0.5 winning by that margin, when v3's default is 0.7 and v4's **model B already uses 0.5**,
+suggests the optimum may be lower still — with 52 features, sampling fewer per split decorrelates
+the trees, which is exactly what an L1 objective on a noisy target tends to want.
+
+So this cell sweeps `feature_fraction` over 0.3-0.7 on the correct base, then tests `cat_smooth`
+50 on top of the winner, then the pair together. Everything is gated on both schemes and every
+configuration is cached, so it is resumable.
+
+It writes `results/v5_choice_weighted.json` itself, with `rows = "base"` — fixing the stale choice
+file left by the pre-gate CELL 19. Budget ~35 minutes.
+""")
+code(r"""
+# CELL 22 — feature_fraction SWEEP ON THE CORRECT BASE (heavy, resumable)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+MARGIN = 0.0005
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import lightgbm as lgb
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)
+    v3, v4, v5 = P.load_modules_v5(".", verbose=False)
+    data, test = P.get_tables_v5(v3, v4, v5, verbose=False)
+    vp = P.release_mask(data)
+    w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+    folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+
+    # the correct base: featset F, P2, w_open 1.0, BASE windows (the gate rejects "all")
+    FEATS = v5.FEAT_F
+    BASE_PARAMS = dict(v5.P2)
+    W_OPEN = 1.0
+    ROWS = data.window.isin(v3.ALL_OFFSETS)
+    cats = [c for c in v3.CAT_COLS if c in FEATS]
+    print(f"  base: featset F ({len(FEATS)} feats) | {BASE_PARAMS} | w_open {W_OPEN}"
+          f" | windows base")
+    print(f"  v3 default feature_fraction {v3.PARAMS['feature_fraction']} | "
+          f"v4 PARAMS_B uses {v4.PARAMS_B['feature_fraction']}")
+
+    LOGP = OUT_DIR / "v5_ff_sweep.json"
+    SW = _json.loads(LOGP.read_text()) if LOGP.exists() else {}
+
+    def rcv(pp, folds_k):
+        p = {**v3.PARAMS, **pp}
+        wt = np.where(data.window.isin(v3.OPEN_OFFSETS), W_OPEN, 1.0)
+        w_end = data.d1 + pd.Timedelta(days=9)
+        oof = pd.Series(np.nan, index=data.index)
+        iters = []
+        for vm, purge in folds_k:
+            in_val = data.movie_title.isin(vm)
+            trm = ROWS & ~data.bad & ~in_val
+            if purge is not None:
+                trm &= ~((data.d1 <= purge[1]) & (w_end >= purge[0]))
+            vam = vp & in_val
+            dtr = lgb.Dataset(data.loc[trm, FEATS], data.y[trm], weight=wt[trm.to_numpy()],
+                              categorical_feature=cats)
+            dva = lgb.Dataset(data.loc[vam, FEATS], data.y[vam], categorical_feature=cats,
+                              reference=dtr)
+            m = lgb.train(p, dtr, 6000, valid_sets=[dva],
+                          callbacks=[lgb.early_stopping(100, verbose=False)])
+            iters.append(m.best_iteration)
+            oof[vam] = m.predict(data.loc[vam, FEATS], num_iteration=m.best_iteration)
+        return oof.dropna(), iters
+
+    def swcv(tag, extra):
+        key = _json.dumps(sorted({**BASE_PARAMS, **extra}.items()), default=str)
+        if key in SW:
+            r = SW[key]
+        else:
+            r = {}
+            for k in FOLD_KINDS:
+                _t = time.time()
+                o, it = rcv({**BASE_PARAMS, **extra}, folds[k])
+                s_ = data.loc[o.index]
+                e = np.abs(s_.y - o.clip(lower=0))
+                wv = EW[data.index.get_indexer(o.index)]
+                r[k] = float((e * wv).sum() / wv.sum())
+                r[k + "_iters"] = it
+                print(f"    {tag:26s} {k:5s} WEIGHTED {r[k]:.5f} "
+                      f"({time.time() - _t:.0f}s)", flush=True)
+            SW[key] = r
+            LOGP.write_text(_json.dumps(SW, indent=1, default=float))
+        return r
+
+    def gate(tag, cand, base):
+        d = {k: base[k] - cand[k] for k in FOLD_KINDS}
+        ok = all(v > -1e-9 for v in d.values()) and max(d.values()) > MARGIN
+        print(f"  {tag:26s} " + " | ".join(f"{k} {d[k]:+.5f}" for k in FOLD_KINDS)
+              + f"  -> {'ACCEPT' if ok else 'reject'}")
+        return ok
+
+    line("F1  feature_fraction sweep on windows=base")
+    base = swcv("ff 0.7 (v3 default)", {})
+    results = {0.7: base}
+    for ff in (0.3, 0.4, 0.5, 0.6):
+        r = swcv(f"ff {ff}", {"feature_fraction": ff})
+        results[ff] = r
+        gate(f"ff {ff}", r, base)
+    # pick the value that is best on BOTH schemes where possible
+    dom = [f for f in results
+           if all(results[f][k] <= min(results[x][k] for x in results) + 1e-9
+                  for k in FOLD_KINDS)]
+    ff_sel = dom[0] if dom else min(results, key=lambda f: results[f]["group"])
+    print(f"\n  chosen feature_fraction = {ff_sel}"
+          f"{' (best on both schemes)' if dom else ' (best on group; schemes disagree)'}")
+    for f in sorted(results):
+        print(f"    ff {f}: " + " | ".join(f"{k} {results[f][k]:.5f}" for k in FOLD_KINDS))
+    best = results[ff_sel]
+    sel = {"feature_fraction": ff_sel} if ff_sel != 0.7 else {}
+
+    line("F2  cat_smooth 50 on top of the chosen feature_fraction")
+    r = swcv(f"ff {ff_sel} + cat_smooth 50", {**sel, "cat_smooth": 50})
+    if gate("+ cat_smooth 50", r, best):
+        sel, best = {**sel, "cat_smooth": 50}, r
+
+    line("F3  write the corrected choice file")
+    params_sel = {**BASE_PARAMS, **sel}
+    _choice = dict(name=f"v4 (F, P2) wopen1.0 windows=base + {sel or 'nothing'}",
+                   feats=FEATS, params=params_sel, rows="base", w_open=W_OPEN,
+                   iters_group=best["group_iters"],
+                   mean_weighted=float(np.mean([best[k] for k in FOLD_KINDS])),
+                   mean_plain=None)
+    (OUT_DIR / "v5_choice_weighted.json").write_text(_json.dumps(_choice, indent=1,
+                                                                 default=float))
+    print(f"  params {params_sel}")
+    print(f"  group WEIGHTED {best['group']:.5f} | time WEIGHTED {best['time']:.5f}")
+    print(f"  raw-model improvement over the 0.42677 config's 0.44383 group: "
+          f"{0.44383 - best['group']:+.5f}")
+    print("\n  wrote results/v5_choice_weighted.json with rows='base', replacing the stale")
+    print("  file the pre-gate CELL 19 left behind. Run CELL 20 next.")
+print(f"\n[CELL 22] {time.time() - t0:.1f}s")
 """)
 
 # =================================================================== decision log
