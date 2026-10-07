@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 9
+NB_VERSION = 10
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -2412,22 +2412,55 @@ else:
               f"mean WEIGHTED {r['mean_weighted']:.5f}")
         return r
 
+    # The round-4 rule, now actually enforced: a change ships only if it does not make
+    # EITHER scheme worse, and improves at least one by more than MARGIN. Selecting on the
+    # mean let `windows all` through on a 0.00004 mean gain that was really -0.0015 on group
+    # (the scheme the LB offset is calibrated against) and +0.0016 on time.
+    MARGIN = 0.0005
+
+    def better(cand, base):
+        d = {k: base[k]["weighted"] - cand[k]["weighted"] for k in FOLD_KINDS}   # >0 = better
+        no_regress = all(v > -1e-9 for v in d.values())
+        real_gain = max(d.values()) > MARGIN
+        return no_regress and real_gain, d
+
+    def verdict(name, cand, base):
+        ok, d = better(cand, base)
+        bits = " | ".join(f"{k} {d[k]:+.5f}" for k in FOLD_KINDS)
+        print(f"    gate: {bits}  -> {'ACCEPT' if ok else 'REJECT'}"
+              f"{'' if ok else '  (needs no regression on either scheme and >'
+                              f'{MARGIN:.4f} on one)'}")
+        return ok
+
     line("V1a  stage 0: pick w_open FIRST, on the baseline")
     print("  v5's run_cv passes no sample weight at all (w_open = 1.0), while v4 used 2.0.")
     print("  Testing bundles at the wrong w_open is what invalidated the first run of this")
     print("  cell, so the weighting is settled before anything else.")
     wo_runs = {wo: cv(f"v4 (F, P2) wopen{wo}", v5.FEAT_F, v5.P2, BASE_ROWS, wo)
                for wo in (1.0, 2.0, 3.0)}
-    wo_sel = min(wo_runs, key=lambda w: wo_runs[w]["mean_weighted"])
-    print(f"  stage 0 choice: w_open = {wo_sel} "
-          f"(WEIGHTED {wo_runs[wo_sel]['mean_weighted']:.5f})")
+    # w_open is a baseline property, not an incremental change, so pick the one that is
+    # best on BOTH schemes if such a value exists, else the best on group.
+    _cands = [w for w in wo_runs
+              if all(wo_runs[w][k]["weighted"] <= min(wo_runs[x][k]["weighted"] for x in wo_runs)
+                     + 1e-9 for k in FOLD_KINDS)]
+    wo_sel = _cands[0] if _cands else min(wo_runs,
+                                          key=lambda w: wo_runs[w]["group"]["weighted"])
+    for w in sorted(wo_runs):
+        print(f"    w_open {w}: " + " | ".join(
+            f"{k} {wo_runs[w][k]['weighted']:.5f}" for k in FOLD_KINDS))
+    print(f"  stage 0 choice: w_open = {wo_sel}"
+          f"{' (best on both schemes)' if _cands else ' (best on group; schemes disagree)'}")
 
     line("V1b  stage A: each new bundle, at the chosen w_open, selected on WEIGHTED")
     best_name, best_feats = f"v4 (F, P2) wopen{wo_sel}", v5.FEAT_F
     best = wo_runs[wo_sel]
     single = {n: cv(f"F + {n} wopen{wo_sel}", v5.FEAT_F + b, v5.P2, BASE_ROWS, wo_sel)
               for n, b in v5.BUNDLES.items()}
-    wins_w = [n for n in v5.BUNDLES if single[n]["mean_weighted"] < best["mean_weighted"]]
+    wins_w = []
+    for n in v5.BUNDLES:
+        print(f"  bundle {n}:")
+        if verdict(n, single[n], best):
+            wins_w.append(n)
     wins_p = [n for n in v5.BUNDLES if single[n]["mean_plain"] < best["mean_plain"]]
     print(f"\n  bundles that help on WEIGHTED: {wins_w or 'none'}")
     print(f"  bundles that help on PLAIN   : {wins_p or 'none'}"
@@ -2445,8 +2478,9 @@ else:
 
     line("V2  stage B: extra training windows, at the chosen w_open")
     r = cv(best_name + " + windows", best_feats, v5.P2, ALL_ROWS, wo_sel)
-    rows_sel = ALL_ROWS if r["mean_weighted"] < best["mean_weighted"] else BASE_ROWS
-    if r["mean_weighted"] < best["mean_weighted"]:
+    _ok = verdict("windows", r, best)
+    rows_sel = ALL_ROWS if _ok else BASE_ROWS
+    if _ok:
         best, best_name = r, best_name + " + windows"
     print(f"  stage B choice: windows "
           f"{'all' if rows_sel is ALL_ROWS else 'base'} (WEIGHTED {best['mean_weighted']:.5f})")
@@ -2456,7 +2490,7 @@ else:
     for lr in (0.03, 0.08):
         r = cv(f"{best_name} + lr{lr}", best_feats, {**v5.P2, "learning_rate": lr},
                rows_sel, wo_sel)
-        if r["mean_weighted"] < best["mean_weighted"]:
+        if verdict(f"lr{lr}", r, best):
             params_sel, best = {**v5.P2, "learning_rate": lr}, r
             best_name = f"{best_name} + lr{lr}"
     print(f"  final: {best_name}")
@@ -2464,8 +2498,10 @@ else:
           f"| w_open {wo_sel}")
     print(f"    mean plain {best['mean_plain']:.5f} | mean WEIGHTED "
           f"{best['mean_weighted']:.5f}")
-    print(f"    expected LB ~ {best['mean_weighted'] - 0.009:.4f} "
-          f"(group proxy minus the calibrated 0.009 offset)")
+    print(f"    group WEIGHTED {best['group']['weighted']:.5f} | "
+          f"time WEIGHTED {best['time']['weighted']:.5f}")
+    print("    (these are RAW model A. The LB estimate comes from CELL 20, after"
+          " post-processing: expected LB = group post-processed - 0.0087)")
 
     _choice = dict(name=best_name, feats=best_feats, params=params_sel,
                    rows="all" if rows_sel is ALL_ROWS else "base", w_open=wo_sel,
@@ -2503,11 +2539,22 @@ else:
     import lightgbm as lgb
     import importlib, v5_pipeline
     P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
+    # FORCE_CHOICE lets you rebuild any configuration without re-running CELL 19.
+    # Set it to reproduce an earlier submission, e.g. the windows="base" model that
+    # scored 0.42677:
+    #     FORCE_CHOICE = {"rows": "base"}
+    # Any key given here overrides results/v5_choice_weighted.json.
+    FORCE_CHOICE = {}
+
     _cp = OUT_DIR / "v5_choice_weighted.json"
     if not _cp.exists():
         print("results/v5_choice_weighted.json missing -> run CELL 19 first")
     else:
         ch = _json.loads(_cp.read_text())
+        if FORCE_CHOICE:
+            ch = {**ch, **FORCE_CHOICE}
+            ch["cfg_label"] = str(ch.get("name", "?")) + " [FORCED " + str(FORCE_CHOICE) + "]"
+            print(f"  FORCE_CHOICE applied: {FORCE_CHOICE}")
         v3, v4, v5 = P.load_modules_v5(".", verbose=False)
         data, test = P.get_tables_v5(v3, v4, v5, verbose=False)
         vp = P.release_mask(data)
@@ -2627,6 +2674,10 @@ else:
                 den += va.w.to_numpy().sum()
             print(f"  [{kind}] raw A {raw:.4f} -> post-processed {num / den:.4f}"
                   f"   gain {raw - num / den:+.4f}")
+            if kind == "group":
+                post_group = num / den          # the LB-calibrated figure
+                print(f"  [group] => expected LB {post_group - 0.0087:.4f} "
+                      f"(calibrated offset 0.0087 from two paired readings)")
         post = fit_v5c(pd.concat(frames.values()))
         print(f"\n  shipped: blend A {post['w']:.2f} | zero threshold p0 > {post['th']:.2f}")
         print(f"    horizon multipliers {post['hm']}")
@@ -2652,7 +2703,30 @@ else:
         ratio = apply_v5c(tf, post)
         _hist = (test.t1.fillna(0) + test.t2.fillna(0) + test.t3.fillna(0)).to_numpy()
         ratio[_hist == 0] = 0
-        v4.write_sub("submission_v5c.csv", test, ratio, test.scale.to_numpy())
+        # Write a fingerprinted file FIRST so a run can never destroy a good submission,
+        # then promote it to submission_v5c.csv only if its proxy is at least as good as
+        # whatever that name currently holds (tracked in results/submission_ledger.json).
+        _cfg_label = ch.get("cfg_label", ch.get("name", "?"))
+        _fn = f"submission_v5c_{CFG}.csv"
+        v4.write_sub(_fn, test, ratio, test.scale.to_numpy())
+        _ledger_p = OUT_DIR / "submission_ledger.json"
+        _ledger = _json.loads(_ledger_p.read_text()) if _ledger_p.exists() else {}
+        _this = float(post_group)
+        _cur = _ledger.get("submission_v5c.csv", {}).get("group_post")
+        _ledger[_fn] = dict(group_post=_this, config=_cfg_label, fingerprint=CFG)
+        if _cur is None or _this <= _cur + 1e-9:
+            import shutil as _sh
+            _sh.copyfile(_fn, "submission_v5c.csv")
+            _ledger["submission_v5c.csv"] = dict(group_post=_this, config=_cfg_label,
+                                                 fingerprint=CFG)
+            print(f"  promoted {_fn} -> submission_v5c.csv "
+                  f"(group post-processed {_this:.4f}"
+                  f"{f', previous {_cur:.4f}' if _cur is not None else ''})")
+        else:
+            print(f"  NOT promoted: this config's group post-processed {_this:.4f} is WORSE "
+                  f"than the {_cur:.4f} already behind submission_v5c.csv.")
+            print(f"  The better file is untouched. This run is saved as {_fn} only.")
+        _ledger_p.write_text(_json.dumps(_ledger, indent=1, default=float))
         for _ref in ("submission_v5a.csv", "submission_v5.csv"):
             if Path(_ref).exists():
                 _o = pd.read_csv(_ref).total_ticket.to_numpy()
@@ -2660,8 +2734,9 @@ else:
                 print(f"  vs {_ref}: differs on {(_o != _n).mean():.1%} of rows | "
                       f"totals {_o.sum():,} -> {_n.sum():,} | zeros "
                       f"{(_o == 0).mean():.1%} -> {(_n == 0).mean():.1%}")
-        print(f"\n  SUBMIT submission_v5c.csv | expected LB ~ "
-              f"{ch['mean_weighted'] - 0.009:.4f} before post-processing credit")
+        print(f"\n  expected LB for THIS config: {post_group - 0.0087:.4f}")
+        print("  Submit submission_v5c.csv only if the promotion line above says it was")
+        print("  promoted; otherwise the previous file is better and is still in place.")
 print(f"\n[CELL 20] {time.time() - t0:.1f}s")
 """)
 
