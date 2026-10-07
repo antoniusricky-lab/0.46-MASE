@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 10
+NB_VERSION = 11
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -2679,6 +2679,12 @@ else:
                 print(f"  [group] => expected LB {post_group - 0.0087:.4f} "
                       f"(calibrated offset 0.0087 from two paired readings)")
         post = fit_v5c(pd.concat(frames.values()))
+        # CELL 21 R1 may have found the rounded objective better; prefer it when present
+        _pr = OUT_DIR / "post_rounded.json"
+        if _pr.exists():
+            post = _json.loads(_pr.read_text())
+            post["hm"] = {int(k): v for k, v in post["hm"].items()}
+            print("  using results/post_rounded.json from CELL 21 R1 (rounded objective)")
         print(f"\n  shipped: blend A {post['w']:.2f} | zero threshold p0 > {post['th']:.2f}")
         print(f"    horizon multipliers {post['hm']}")
 
@@ -2738,6 +2744,212 @@ else:
         print("  Submit submission_v5c.csv only if the promotion line above says it was")
         print("  promoted; otherwise the previous file is better and is still in place.")
 print(f"\n[CELL 20] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 21 — the rounded objective, and the four parameters never swept
+
+**R1 is the real idea.** The competition metric is computed on **whole tickets**:
+`|t_true - round(ratio x scale)| / scale`. v4 knew this — its `crossfit` returns both the raw and
+the rounded MASE, and `final()` selects on the rounded one. My CELL 20 fits the blend weight, zero
+threshold and horizon multipliers on the **unrounded** objective, so it has been optimising a
+proxy of a proxy.
+
+This matters precisely because of what the scale diagnosis found. For a pair with `scale = 5`,
+rounding shifts the effective ratio by up to `0.5 / 5 = 0.1`; at `scale = 2` it is 0.25. Those
+rows are 33% of the test set and carry roughly 3x weight in the proxy. R1 refits the same
+post-processing against the **rounded, test-weighted** objective and gates the result on both
+schemes.
+
+**R2** sweeps the parameters that every round so far has left at v3's defaults: `feature_fraction`
+0.7, `bagging_fraction` 0.8, `lambda_l2` 1.0, `cat_smooth` 20. Only `num_leaves` and
+`min_data_in_leaf` were ever tuned (via v4's paramsets), so this is genuinely unexplored ground —
+though expect small effects.
+
+Both reuse CELL 20's cached OOF, so R1 costs seconds. R2 retrains, ~4 min per configuration.
+""")
+code(r"""
+# CELL 21 — ROUNDED OBJECTIVE + UNSWEPT PARAMETERS
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+MARGIN = 0.0005
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import lightgbm as lgb
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)
+    _cp = OUT_DIR / "v5_choice_weighted.json"
+    if not _cp.exists():
+        print("results/v5_choice_weighted.json missing -> run CELL 19 first")
+    else:
+        ch = _json.loads(_cp.read_text())
+        v3, v4, v5 = P.load_modules_v5(".", verbose=False)
+        data, test = P.get_tables_v5(v3, v4, v5, verbose=False)
+        vp = P.release_mask(data)
+        w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+        folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+        feats, params = ch["feats"], ch["params"]
+        rows = (pd.Series(True, index=data.index) if ch["rows"] == "all"
+                else data.window.isin(v3.ALL_OFFSETS))
+        wo = ch["w_open"]
+        cats = [c for c in v3.CAT_COLS if c in feats]
+        import hashlib
+        CFG = hashlib.md5(_json.dumps(
+            [sorted(feats), sorted(params.items()), ch["rows"], wo], default=str
+        ).encode()).hexdigest()[:12]
+        print(f"  config {ch.get('name')} | fingerprint {CFG}")
+
+        # ---------------------------------------------- build the OOF frame
+        need = {n: {k: CACHE_DIR / f"v5c_{CFG}_{n}_{k}.pkl" for k in FOLD_KINDS}
+                for n in ("A", "B", "p0")}
+        missing = [str(p_) for n in need for p_ in need[n].values() if not p_.exists()]
+        if missing:
+            print(f"  missing {len(missing)} cached OOF files -> run CELL 20 for this config first")
+        else:
+            frames = {}
+            for kind in FOLD_KINDS:
+                O = {n: pd.read_pickle(need[n][kind]) for n in need}
+                idx = O["A"].index
+                fr = pd.DataFrame({"y": data.y.loc[idx], "A": O["A"].clip(lower=0),
+                                   "B": O["B"].clip(lower=0), "p0": O["p0"].loc[idx],
+                                   "h": data.h.loc[idx], "sb": sb.loc[idx],
+                                   "scale": data.scale.loc[idx],
+                                   "t": data.total_ticket.loc[idx],
+                                   "mv": data.movie_title.loc[idx]})
+                fr["w"] = w_eval[fr.sb.to_numpy()]
+                frames[kind] = fr
+
+            line("R1  fit post-processing on the ROUNDED metric instead of the raw one")
+            TH = np.round(np.arange(0.30, 0.901, 0.02), 2)
+
+            def err_raw(fr, r):
+                return np.abs(fr.y.to_numpy() - np.clip(r, 0, None))
+
+            def err_round(fr, r):
+                # the competition's own metric: whole tickets, divided by scale
+                sc = fr.scale.to_numpy()
+                tick = np.floor(np.clip(r, 0, None) * sc + 0.5)
+                return np.abs(fr.t.to_numpy() - tick) / sc
+
+            def fit_post(fr, errfn):
+                y, ww = fr.y.to_numpy(), fr.w.to_numpy()
+                bf = lambda g, e: g[int(np.argmin([e(x) for x in g]))]
+                a, b = fr.A.to_numpy(), fr.B.to_numpy()
+                w0 = bf(v4.W_GRID,
+                        lambda w: (ww * errfn(fr, w * a + (1 - w) * b)).sum())
+                r = w0 * a + (1 - w0) * b
+                hm = {}
+                for k in v3.HORIZONS:
+                    m = fr.h.to_numpy() == k
+                    if m.sum():
+                        hm[k] = bf(v4.H_GRID, lambda g: (
+                            ww[m] * errfn(fr[m], g * r[m])).sum())
+                r = r * pd.Series(fr.h.to_numpy()).map(hm).fillna(1.0).to_numpy()
+                th = bf(TH, lambda t: (ww * errfn(
+                    fr, np.where(fr.p0.to_numpy() > t, 0.0, r))).sum())
+                return dict(w=float(w0), hm=hm, th=float(th))
+
+            def apply_post(fr, pp):
+                r = pp["w"] * fr.A.to_numpy() + (1 - pp["w"]) * fr.B.to_numpy()
+                r = r * pd.Series(fr.h.to_numpy()).map(pp["hm"]).fillna(1.0).to_numpy()
+                return np.clip(np.where(fr.p0.to_numpy() > pp["th"], 0.0, r), 0, None)
+
+            res = {}
+            for kind, fr in frames.items():
+                for tag, efn in (("fit on RAW (current)", err_raw),
+                                 ("fit on ROUNDED", err_round)):
+                    num = den = 0.0
+                    for vm, _ in folds[kind]:
+                        m = fr.mv.isin(vm)
+                        va, tr = fr[m], fr[~m]
+                        if not len(va) or not len(tr):
+                            continue
+                        r = apply_post(va, fit_post(tr, efn))
+                        # ALWAYS score on the rounded metric - that is the competition's
+                        num += (va.w.to_numpy() * err_round(va, r)).sum()
+                        den += va.w.to_numpy().sum()
+                    res[(kind, tag)] = num / den
+                    print(f"  [{kind}] {tag:22s} rounded WEIGHTED {num / den:.5f}")
+            d = {k: res[(k, "fit on RAW (current)")] - res[(k, "fit on ROUNDED")]
+                 for k in FOLD_KINDS}
+            ok = all(v > -1e-9 for v in d.values()) and max(d.values()) > MARGIN
+            print("\n  gate: " + " | ".join(f"{k} {d[k]:+.5f}" for k in FOLD_KINDS)
+                  + f"  -> {'ACCEPT' if ok else 'REJECT'}")
+            if ok:
+                pp = fit_post(pd.concat(frames.values()), err_round)
+                print(f"  rounded-objective post: blend A {pp['w']:.2f} | "
+                      f"zero threshold p0 > {pp['th']:.2f}")
+                print(f"    horizon multipliers {pp['hm']}")
+                (OUT_DIR / "post_rounded.json").write_text(_json.dumps(pp, indent=1,
+                                                                      default=float))
+                print("  wrote results/post_rounded.json -> CELL 20 will use it if present")
+
+            line("R2  the four parameters left at v3's defaults")
+            print("  v3.PARAMS: feature_fraction 0.7 | bagging_fraction 0.8 | "
+                  "lambda_l2 1.0 | cat_smooth 20")
+            print("  Only num_leaves and min_data_in_leaf were ever tuned.")
+            LOGP = OUT_DIR / "v5_param_sweep.json"
+            SW = _json.loads(LOGP.read_text()) if LOGP.exists() else {}
+
+            def rcv(pp, folds_k):
+                p = {**v3.PARAMS, **pp}
+                wt = np.where(data.window.isin(v3.OPEN_OFFSETS), wo, 1.0)
+                w_end = data.d1 + pd.Timedelta(days=9)
+                oof, iters = pd.Series(np.nan, index=data.index), []
+                for vm, purge in folds_k:
+                    in_val = data.movie_title.isin(vm)
+                    trm = rows & ~data.bad & ~in_val
+                    if purge is not None:
+                        trm &= ~((data.d1 <= purge[1]) & (w_end >= purge[0]))
+                    vam = vp & in_val
+                    dtr = lgb.Dataset(data.loc[trm, feats], data.y[trm],
+                                      weight=wt[trm.to_numpy()], categorical_feature=cats)
+                    dva = lgb.Dataset(data.loc[vam, feats], data.y[vam],
+                                      categorical_feature=cats, reference=dtr)
+                    m = lgb.train(p, dtr, 6000, valid_sets=[dva],
+                                  callbacks=[lgb.early_stopping(100, verbose=False)])
+                    iters.append(m.best_iteration)
+                    oof[vam] = m.predict(data.loc[vam, feats], num_iteration=m.best_iteration)
+                return oof.dropna(), iters
+
+            def swcv(tag, extra):
+                key = _json.dumps(sorted({**params, **extra}.items()), default=str)
+                if key in SW:
+                    r = SW[key]
+                else:
+                    r = {}
+                    for k in FOLD_KINDS:
+                        _t = time.time()
+                        o, _ = rcv({**params, **extra}, folds[k])
+                        s = data.loc[o.index]
+                        e = np.abs(s.y - o.clip(lower=0))
+                        wv = EW[data.index.get_indexer(o.index)]
+                        r[k] = float((e * wv).sum() / wv.sum())
+                        print(f"    {tag:28s} {k:5s} WEIGHTED {r[k]:.5f} "
+                              f"({time.time() - _t:.0f}s)", flush=True)
+                    SW[key] = r
+                    LOGP.write_text(_json.dumps(SW, indent=1, default=float))
+                return r
+
+            base = swcv("baseline (v3 defaults)", {})
+            for tag, extra in (("feature_fraction 0.5", {"feature_fraction": 0.5}),
+                               ("feature_fraction 0.9", {"feature_fraction": 0.9}),
+                               ("bagging_fraction 0.6", {"bagging_fraction": 0.6}),
+                               ("bagging_fraction 1.0", {"bagging_fraction": 1.0}),
+                               ("lambda_l2 5.0", {"lambda_l2": 5.0}),
+                               ("lambda_l2 0.1", {"lambda_l2": 0.1}),
+                               ("cat_smooth 5", {"cat_smooth": 5}),
+                               ("cat_smooth 50", {"cat_smooth": 50})):
+                r = swcv(tag, extra)
+                dd = {k: base[k] - r[k] for k in FOLD_KINDS}
+                good = all(v > -1e-9 for v in dd.values()) and max(dd.values()) > MARGIN
+                print(f"  {tag:24s} " + " | ".join(f"{k} {dd[k]:+.5f}" for k in FOLD_KINDS)
+                      + f"  -> {'ACCEPT' if good else 'reject'}")
+            print("\n  Any ACCEPT here is a real both-scheme win; add it to the chosen params")
+            print("  in results/v5_choice_weighted.json and re-run CELL 20.")
+print(f"\n[CELL 21] {time.time() - t0:.1f}s")
 """)
 
 # =================================================================== decision log
