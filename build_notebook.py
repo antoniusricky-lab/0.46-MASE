@@ -1615,6 +1615,323 @@ else:
 print(f"\n[CELL 14] {time.time() - t0:.1f}s")
 """)
 
+md(r"""
+## CELL 15 — is zero an absorbing state, and can we enforce it?
+
+v4 predicts every `(pair, day)` **independently**. Nothing stops it emitting `0.5, 0, 0.3` across
+D8-D10, which is physically odd: once a cinema drops a film it rarely brings it back. If zero is
+close to absorbing in the data, enforcing that on predictions is free information v4 cannot
+express.
+
+This is cheap and it is the first experiment here that exploits structure *across* horizons rather
+than treating rows independently. Three steps:
+
+- **Z1/Z2** measure the real resurrection rate on release-anchored train windows: given `y = 0` at
+  horizon `h`, how often is any later horizon positive? That is the honest ceiling on the idea --
+  if films come back often, enforcing absorption destroys those rows.
+- **Z3** counts how often v4's own post-processed predictions already violate the pattern.
+- **Z4** fits a threshold `tau`: once the prediction drops below `tau`, zero that horizon and
+  every later one. Fitted on four folds, scored on the fifth, on the **weighted** objective, on
+  both fold schemes.
+
+Needs CELL 14's cached OOF (`cache/oofF_*.pkl`). No model training, so it runs in seconds.
+""")
+code(r"""
+# CELL 15 — ZERO AS AN ABSORBING STATE (cheap; needs CELL 14's cached OOF)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+PAIR = ["movie_title", "cinema_ids"]
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import v5_pipeline as P
+    v3, v4 = P.load_modules(".", verbose=False)
+    data, test = P.get_tables(v3, v4, verbose=False)
+    vp = P.release_mask(data)
+    w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+    s = data[vp]
+    assert not s.duplicated(PAIR + ["h"]).any(), "pair x horizon is not unique in release windows"
+
+    line("Z1  resurrection: given y == 0 at horizon h, is any LATER horizon positive?")
+    Y = s.pivot_table(index=PAIR, columns="h", values="total_ticket", aggfunc="sum")
+    Y = Y.reindex(columns=list(v3.HORIZONS))
+    A = Y.to_numpy()
+    rows = []
+    for j, h in enumerate(list(v3.HORIZONS)[:-1]):
+        zero_now = A[:, j] == 0
+        later_pos = (np.nan_to_num(A[:, j + 1:]) > 0).any(axis=1)
+        n = int(zero_now.sum())
+        rows.append(dict(h=h, pairs_zero_at_h=n,
+                         resurrect=float(later_pos[zero_now].mean()) if n else np.nan,
+                         absorbing=float(1 - later_pos[zero_now].mean()) if n else np.nan))
+    print(pd.DataFrame(rows).round(4).to_string(index=False))
+    print(f"\npairs in release windows: {len(Y):,}")
+    print("`absorbing` near 1.0 means a dropped pair stays dropped and the constraint is safe;")
+    print("near 0.5 means films come back often and enforcing it would destroy those rows.")
+
+    line("Z2  first-zero onward: of pairs with a zero, share whose remaining days are all zero")
+    first_zero = np.argmax(np.nan_to_num(A) == 0, axis=1)
+    has_zero = (np.nan_to_num(A) == 0).any(axis=1)
+    tail_all_zero = np.array([
+        bool((np.nan_to_num(A[i, first_zero[i]:]) == 0).all()) if has_zero[i] else False
+        for i in range(len(A))])
+    print(f"pairs with at least one zero in D4-D10 : {int(has_zero.sum()):,} "
+          f"({has_zero.mean():.1%})")
+    print(f"  of those, every day from the first zero onward is zero: "
+          f"{tail_all_zero[has_zero].mean():.1%}")
+
+    line("Z3  does v4 already violate the pattern? (zero then positive in its own predictions)")
+    frames, folds = {}, {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+    for kind in FOLD_KINDS:
+        _c = {n: CACHE_DIR / f"oofF_{n}_{kind}.pkl" for n in ("A", "B", "p0")}
+        if not all(p.exists() for p in _c.values()):
+            print(f"  [{kind}] missing {[p.name for p in _c.values() if not p.exists()]}"
+                  f" -> run CELL 14 first")
+            continue
+        O = {n: pd.read_pickle(p) for n, p in _c.items()}
+        idx = O["A"].index
+        fr = pd.DataFrame({"y": data.y.loc[idx], "A": O["A"].clip(lower=0),
+                           "B": O["B"].clip(lower=0), "p0": O["p0"].loc[idx],
+                           "h": data.h.loc[idx], "sb": sb.loc[idx],
+                           "mv": data.movie_title.loc[idx],
+                           "ci": data.cinema_ids.loc[idx].astype(str)})
+        fr["w"] = w_eval[fr.sb.to_numpy()]
+        frames[kind] = fr
+    if not frames:
+        print("no cached OOF -> nothing further to do in this cell")
+    else:
+        for kind, fr in frames.items():
+            post = P.fit_post_weighted(fr, v3, v4, weighted=True)
+            fr["r"] = np.clip(P.apply_post(fr, post, v4), 0, None)
+            Rp = fr.pivot_table(index=["mv", "ci"], columns="h", values="r")
+            Rp = Rp.reindex(columns=list(v3.HORIZONS)).to_numpy()
+            iszero = np.nan_to_num(Rp) <= 0
+            viol = (iszero[:, :-1] & (np.nan_to_num(Rp[:, 1:]) > 0)).any(axis=1)
+            print(f"  [{kind}] pairs whose predictions go zero then positive again: "
+                  f"{int(viol.sum()):,} of {len(Rp):,} ({viol.mean():.1%})")
+
+        line("Z4  fit the absorbing threshold tau, cross-fitted, on the WEIGHTED objective")
+        TAU = np.round(np.concatenate([[0.0], np.arange(0.02, 0.405, 0.02)]), 3)
+
+        def absorb(mat, tau):
+            # once the prediction is below tau at some horizon, zero that one and all later
+            below = np.nan_to_num(mat, nan=np.inf) < tau
+            return np.where(np.logical_or.accumulate(below, axis=1), 0.0, mat)
+
+        for kind, fr in frames.items():
+            cols = list(v3.HORIZONS)
+            Yp = fr.pivot_table(index=["mv", "ci"], columns="h", values="y")
+            Rp = fr.pivot_table(index=["mv", "ci"], columns="h", values="r")
+            Wp = fr.pivot_table(index=["mv", "ci"], columns="h", values="w")
+            # align all three on one index/column order - never assume pivots agree
+            _ix = Yp.index.union(Rp.index).union(Wp.index)
+            Yp, Rp, Wp = (x.reindex(index=_ix, columns=cols) for x in (Yp, Rp, Wp))
+            mv_of_row = Yp.index.get_level_values(0).to_numpy()
+            ok = ~np.isnan(Rp.to_numpy()) & ~np.isnan(Yp.to_numpy())
+            Ya, Ra, Wa = Yp.to_numpy(), Rp.to_numpy(), np.nan_to_num(Wp.to_numpy())
+
+            def wmae(mask, mat):
+                m = ok & mask
+                return float((Wa[m] * np.abs(Ya[m] - mat[m])).sum()), float(Wa[m].sum())
+
+            base_n = base_d = corr_n = corr_d = 0.0
+            picks = []
+            for vm, _ in folds[kind]:
+                in_val = np.isin(mv_of_row, list(vm))
+                tr_mask = np.repeat(~in_val[:, None], len(cols), axis=1)
+                va_mask = np.repeat(in_val[:, None], len(cols), axis=1)
+                if not (ok & tr_mask).any() or not (ok & va_mask).any():
+                    continue
+                best, bt = None, 0.0
+                for t in TAU:
+                    n_, d_ = wmae(tr_mask, absorb(Ra, t))
+                    v = n_ / d_ if d_ else np.inf
+                    if best is None or v < best:
+                        best, bt = v, t
+                picks.append(bt)
+                n_, d_ = wmae(va_mask, Ra)
+                base_n += n_
+                base_d += d_
+                n_, d_ = wmae(va_mask, absorb(Ra, bt))
+                corr_n += n_
+                corr_d += d_
+            print(f"  [{kind}] tau chosen per fold {picks} | WEIGHTED "
+                  f"{base_n / base_d:.4f} -> {corr_n / corr_d:.4f}"
+                  f"   gain {(base_n / base_d) - (corr_n / corr_d):+.4f}")
+        print("\nA gain on BOTH schemes means ship it; a split verdict means drop it.")
+        print("tau = 0.0 chosen means the data prefers no absorption at all.")
+print(f"\n[CELL 15] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 16 — monotone median recalibration, and the `total_show` oracle
+
+Two independent ideas.
+
+**R1 — recalibration.** v4's `H_GRID` step is one scalar per horizon. That is the crudest possible
+calibration. A **monotone median curve** is strictly more expressive and still exactly right for
+MAE: bin predictions by weighted quantile, take each bin's weighted *median* of the truth (the
+MAE-optimal constant for that bin), force the curve non-decreasing, then interpolate. Because it
+is monotone it preserves v4's within-bin ranking, and because it uses medians it cannot repeat the
+mean-matching mistake. Fitted on four folds, scored on the fifth, weighted objective.
+
+**R2 — the `total_show` oracle.** `tickets = shows x tickets-per-show`. Showtimes are a cinema
+*scheduling decision* with strong persistence, plausibly far more predictable than demand, and
+`total_show` is in `train.csv` but v4 only uses it for D1-D3 (`shw1..shw3`). R2 asks what we would
+score if future showtimes were known, holding tickets-per-show at its D3 level. R3 then asks how
+much of that survives when the showtime path is *predicted* instead of known -- the same
+total-vs-shape question that killed the two-stage model, so expect R3 to be far below R2.
+
+Both reuse CELL 14's cached OOF. Minutes, not hours.
+""")
+code(r"""
+# CELL 16 — MONOTONE MEDIAN RECALIBRATION + total_show ORACLE
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import v5_pipeline as P
+    v3, v4 = P.load_modules(".", verbose=False)
+    data, test = P.get_tables(v3, v4, verbose=False)
+    vp = P.release_mask(data)
+    w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+    folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+
+    def wmedian(v, w):
+        if len(v) == 0:
+            return np.nan
+        o = np.argsort(v)
+        v, w = np.asarray(v)[o], np.asarray(w)[o]
+        c = np.cumsum(w)
+        if c[-1] <= 0:
+            return float(np.median(v))
+        return float(v[np.searchsorted(c, 0.5 * c[-1])])
+
+    def fit_curve(r, y, w, nbins=40, min_n=80):
+        # monotone median calibration curve: returns (x knots, y knots) for np.interp
+        q = np.unique(np.quantile(r, np.linspace(0, 1, nbins + 1)))
+        if len(q) < 3:
+            return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+        idx = np.clip(np.searchsorted(q, r, side="right") - 1, 0, len(q) - 2)
+        xs, ys = [], []
+        for b in range(len(q) - 1):
+            m = idx == b
+            if m.sum() >= min_n:
+                xs.append(float(np.median(r[m])))
+                ys.append(wmedian(y[m], w[m]))
+        if len(xs) < 3:
+            return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+        xs, ys = np.array(xs), np.maximum.accumulate(np.array(ys))   # enforce non-decreasing
+        return xs, ys
+
+    frames = {}
+    for kind in FOLD_KINDS:
+        _c = {n: CACHE_DIR / f"oofF_{n}_{kind}.pkl" for n in ("A", "B", "p0")}
+        if not all(p.exists() for p in _c.values()):
+            print(f"[{kind}] missing cached OOF -> run CELL 14 first")
+            continue
+        O = {n: pd.read_pickle(p) for n, p in _c.items()}
+        idx = O["A"].index
+        fr = pd.DataFrame({"y": data.y.loc[idx], "A": O["A"].clip(lower=0),
+                           "B": O["B"].clip(lower=0), "p0": O["p0"].loc[idx],
+                           "h": data.h.loc[idx], "sb": sb.loc[idx],
+                           "mv": data.movie_title.loc[idx]})
+        fr["w"] = w_eval[fr.sb.to_numpy()]
+        post = P.fit_post_weighted(fr, v3, v4, weighted=True)
+        fr["r"] = np.clip(P.apply_post(fr, post, v4), 0, None)
+        frames[kind] = fr
+
+    if frames:
+        line("R1  monotone median recalibration on top of v4's post-processing")
+        for kind, fr in frames.items():
+            res = {}
+            for tag in ("global", "per-horizon"):
+                bn = bd = cn = cd = 0.0
+                for vm, _ in folds[kind]:
+                    m = fr.mv.isin(vm)
+                    va, tr = fr[m], fr[~m]
+                    if not len(va) or not len(tr):
+                        continue
+                    out = va.r.to_numpy().copy()
+                    if tag == "global":
+                        xs, ys = fit_curve(tr.r.to_numpy(), tr.y.to_numpy(), tr.w.to_numpy())
+                        out = np.interp(va.r.to_numpy(), xs, ys)
+                    else:
+                        for hh in v3.HORIZONS:
+                            mt, mv2 = tr.h.to_numpy() == hh, va.h.to_numpy() == hh
+                            if mt.sum() < 400 or not mv2.any():
+                                continue
+                            xs, ys = fit_curve(tr.r.to_numpy()[mt], tr.y.to_numpy()[mt],
+                                               tr.w.to_numpy()[mt], nbins=20)
+                            out[mv2] = np.interp(va.r.to_numpy()[mv2], xs, ys)
+                    yv, wv = va.y.to_numpy(), va.w.to_numpy()
+                    bn += (wv * np.abs(yv - va.r.to_numpy())).sum()
+                    bd += wv.sum()
+                    cn += (wv * np.abs(yv - np.clip(out, 0, None))).sum()
+                    cd += wv.sum()
+                res[tag] = (bn / bd, cn / cd)
+            for tag, (b, c) in res.items():
+                print(f"  [{kind}] {tag:12s} WEIGHTED {b:.4f} -> {c:.4f}   gain {b - c:+.4f}")
+
+    line("R2  oracle: what if future total_show were known?")
+    _tr = pd.read_csv(Path(v3.DATA) / "train.csv", parse_dates=["date_show"])
+    _shows = _tr.groupby(["movie_title", "cinema_ids", "date_show"], as_index=False).agg(
+        shw_future=("total_show", "sum"), tix_future=("total_ticket", "sum"))
+    s = data[vp].copy()
+    s["_mt"] = s.movie_title.astype(str)
+    s["_ci"] = s.cinema_ids.astype(str)
+    _shows["_mt"] = _shows.movie_title.astype(str)
+    _shows["_ci"] = _shows.cinema_ids.astype(str)
+    s = s.merge(_shows[["_mt", "_ci", "date_show", "shw_future"]],
+                on=["_mt", "_ci", "date_show"], how="left")
+    s["shw_future"] = s.shw_future.fillna(0.0)
+    _tps3 = np.where(s.shw3.to_numpy() > 0, s.t3.to_numpy() / np.maximum(s.shw3.to_numpy(), 1e-9),
+                     0.0)
+    s["oracle_shows"] = s.shw_future.to_numpy() * _tps3 / s.scale.to_numpy()
+    _w = w_eval[pd.cut(s.scale, P.SCALE_EDGES, labels=False).fillna(7).astype(int).to_numpy()]
+    _ix = data[vp].index
+    for kind, fr in frames.items():
+        base = float((fr.w * np.abs(fr.y - fr.r)).sum() / fr.w.sum())
+        print(f"  [{kind}] v4 post-processed            WEIGHTED {base:.4f}")
+        break
+    _e = np.abs(s.y.to_numpy() - s.oracle_shows.to_numpy())
+    print(f"  oracle: known shows x D3 tickets-per-show  WEIGHTED "
+          f"{float((_w * _e).sum() / _w.sum()):.4f}")
+    print(f"  (coverage: rows whose future date is in train.csv "
+          f"{float((s.shw_future > 0).mean()):.1%}; a zero means the pair did not screen)")
+
+    line("R3  how much survives if the showtime path is PREDICTED, not known?")
+    s["shw_ratio"] = s.shw_future.to_numpy() / np.maximum(s.shw3.to_numpy(), 1e-9)
+    s["mv"] = s.movie_title
+    for kind in frames:
+        bn = bd = 0.0
+        for vm, _ in folds[kind]:
+            m = s.mv.isin(vm)
+            va, tr = s[m], s[~m]
+            if not len(va) or not len(tr):
+                continue
+            tab = tr.groupby(["h", "d1_dow"], observed=True).shw_ratio.median()
+            glob = tr.groupby("h", observed=True).shw_ratio.median()
+            pred_ratio = np.array([tab.get((a, b), glob.get(a, 1.0)) for a, b in
+                                   zip(va.h, va.d1_dow)])
+            pr = pred_ratio * va.shw3.to_numpy() * (
+                np.where(va.shw3.to_numpy() > 0,
+                         va.t3.to_numpy() / np.maximum(va.shw3.to_numpy(), 1e-9), 0.0)
+            ) / va.scale.to_numpy()
+            wv = w_eval[pd.cut(va.scale, P.SCALE_EDGES, labels=False).fillna(7)
+                        .astype(int).to_numpy()]
+            bn += (wv * np.abs(va.y.to_numpy() - np.clip(pr, 0, None))).sum()
+            bd += wv.sum()
+        print(f"  [{kind}] predicted-showtime path alone   WEIGHTED {bn / bd:.4f}")
+    print("\nIf R2 is far below v4 but R3 is far above it, showtimes are informative yet")
+    print("unpredictable - the same verdict as the two-stage pair-total model. If R3 lands")
+    print("NEAR v4, a showtime sub-model is worth building as a feature.")
+print(f"\n[CELL 16] {time.time() - t0:.1f}s")
+""")
+
 # =================================================================== decision log
 md(r"""
 ## DECISION LOG
