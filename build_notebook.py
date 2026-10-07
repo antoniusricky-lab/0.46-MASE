@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 12
+NB_VERSION = 13
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -3094,6 +3094,188 @@ else:
     print("\n  wrote results/v5_choice_weighted.json with rows='base', replacing the stale")
     print("  file the pre-gate CELL 19 left behind. Run CELL 20 next.")
 print(f"\n[CELL 22] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 23 — how big is the noise? (and are our recent accepts real?)
+
+CELL 22's `feature_fraction` curve does not behave like a hyperparameter effect:
+
+| ff | 0.3 | 0.4 | 0.5 | 0.6 | 0.7 |
+|----|-----|-----|-----|-----|-----|
+| group | 0.44790 | 0.44362 | **0.44155** | 0.44736 | 0.44383 |
+| time  | 0.45140 | 0.45142 | 0.45168 | 0.45188 | 0.45174 |
+
+Group swings 0.0064 **non-monotonically** while time moves 0.0005. `ff = 0.6` is worse than both
+0.5 and 0.7, which a smooth effect cannot do. Group's std across these five configs is 0.0027
+against time's 0.0002.
+
+The likely cause is a flaw in the metric I built. **21% of the weighted error comes from 602
+validation rows** — 1.26% of the pool — in the scale 2-10 bins, where MASE is 1.7-2.8 and the
+target reaches y = 165. Those rows carry weights of 3.8-8.2. A few of them landing differently
+swings the whole statistic, and `MARGIN = 0.0005` is far below that.
+
+Two measurements settle it:
+
+- **N1 noise floor.** Re-run one fixed configuration with several LightGBM seeds. Seed changes
+  bagging and column sampling, so the spread is a direct estimate of the smallest effect this
+  harness can resolve. If it is ~0.003, then every accept below that is unproven.
+- **N2 paired bootstrap.** Comparing two configurations by their *aggregate* scores throws away
+  the fact that they are evaluated on the **same rows**. Pairing per row and bootstrapping over
+  **movies** (rows within a film are correlated) removes the row-level variance and gives a
+  confidence interval on the difference. This is the test I should have been using all along.
+
+N2 is applied to `ff 0.5` and, for comparison, to seed-vs-seed on an identical configuration —
+the second is a null where the true difference is zero, so it calibrates the first.
+
+Budget ~30 minutes. Nothing here changes the model; it tells us which results to believe.
+""")
+code(r"""
+# CELL 23 — NOISE FLOOR + PAIRED BOOTSTRAP (heavy, resumable)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+SEEDS = [2026, 7, 99]          # three seeds is enough to size the spread
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import lightgbm as lgb
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)
+    v3, v4, v5 = P.load_modules_v5(".", verbose=False)
+    data, test = P.get_tables_v5(v3, v4, v5, verbose=False)
+    vp = P.release_mask(data)
+    w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+    folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+    FEATS = v5.FEAT_F
+    ROWS = data.window.isin(v3.ALL_OFFSETS)
+    cats = [c for c in v3.CAT_COLS if c in FEATS]
+    W_OPEN = 1.0
+
+    line("N0  how concentrated is the weighted metric?")
+    _s = data[vp]
+    _sbv = sb.loc[_s.index]
+    _rows = []
+    for b in range(8):
+        m = (_sbv == b).to_numpy()
+        if m.sum():
+            _rows.append(dict(bin=P.SCALE_LABELS[b], rows=int(m.sum()),
+                              weight=round(float(w_eval[b]), 3),
+                              share_of_weight=float((w_eval[b] * m.sum())
+                                                    / (w_eval[_sbv.to_numpy()]).sum())))
+    print(pd.DataFrame(_rows).to_string(index=False))
+    _small = (_sbv <= 2).to_numpy()
+    print(f"\n  scale<=10 is {_small.mean():.2%} of validation rows carrying "
+          f"{float((w_eval[_sbv.to_numpy()][_small]).sum() / w_eval[_sbv.to_numpy()].sum()):.2%}"
+          f" of the weight -- and they hold the largest errors, so they dominate the variance.")
+
+    def rcv(pp, folds_k, seed):
+        p = {**v3.PARAMS, **pp, "seed": seed, "bagging_seed": seed + 1,
+             "feature_fraction_seed": seed + 2}
+        wt = np.where(data.window.isin(v3.OPEN_OFFSETS), W_OPEN, 1.0)
+        w_end = data.d1 + pd.Timedelta(days=9)
+        oof = pd.Series(np.nan, index=data.index)
+        for vm, purge in folds_k:
+            in_val = data.movie_title.isin(vm)
+            trm = ROWS & ~data.bad & ~in_val
+            if purge is not None:
+                trm &= ~((data.d1 <= purge[1]) & (w_end >= purge[0]))
+            vam = vp & in_val
+            dtr = lgb.Dataset(data.loc[trm, FEATS], data.y[trm], weight=wt[trm.to_numpy()],
+                              categorical_feature=cats)
+            dva = lgb.Dataset(data.loc[vam, FEATS], data.y[vam], categorical_feature=cats,
+                              reference=dtr)
+            m = lgb.train(p, dtr, 6000, valid_sets=[dva],
+                          callbacks=[lgb.early_stopping(100, verbose=False)])
+            oof[vam] = m.predict(data.loc[vam, FEATS], num_iteration=m.best_iteration)
+        return oof.dropna()
+
+    def get_oof(tag, pp, kind, seed):
+        f = CACHE_DIR / f"nz_{tag}_{kind}_{seed}.pkl"
+        if f.exists():
+            return pd.read_pickle(f)
+        _t = time.time()
+        o = rcv(pp, folds[kind], seed)
+        pd.to_pickle(o, f)
+        print(f"    trained {tag} {kind} seed {seed} ({time.time() - _t:.0f}s)", flush=True)
+        return o
+
+    def wscore(o):
+        s = data.loc[o.index]
+        e = np.abs(s.y - o.clip(lower=0))
+        w = EW[data.index.get_indexer(o.index)]
+        return float((e * w).sum() / w.sum())
+
+    CFGS = {"ff07": {}, "ff05": {"feature_fraction": 0.5}}
+    OOF = {t: {k: {} for k in FOLD_KINDS} for t in CFGS}
+
+    line("N1  noise floor: identical configuration, different LightGBM seeds")
+    for tag, pp in CFGS.items():
+        for kind in FOLD_KINDS:
+            for sd in SEEDS:
+                OOF[tag][kind][sd] = get_oof(tag, pp, kind, sd)
+    for tag in CFGS:
+        for kind in FOLD_KINDS:
+            v = [wscore(OOF[tag][kind][sd]) for sd in SEEDS]
+            print(f"  {tag} {kind:5s} " + " ".join(f"{x:.5f}" for x in v)
+                  + f"   mean {np.mean(v):.5f} | std {np.std(v, ddof=1):.5f}"
+                  + f" | range {max(v) - min(v):.5f}")
+    _allstd = [np.std([wscore(OOF[t][k][sd]) for sd in SEEDS], ddof=1)
+               for t in CFGS for k in FOLD_KINDS]
+    NOISE = float(np.mean(_allstd))
+    print(f"\n  seed-to-seed std ~ {NOISE:.5f}")
+    print(f"  a single-seed difference needs to exceed about {2.8 * NOISE:.5f} to be"
+          f" distinguishable (2 x sqrt(2) x std)")
+    print(f"  the MARGIN used so far was 0.00050"
+          f" -> {'FAR TOO SMALL' if 2.8 * NOISE > 0.001 else 'adequate'}")
+
+    line("N2  paired bootstrap over movies: the honest comparison")
+    print("  Both configurations score the SAME rows, so pair per row and resample movies")
+    print("  (rows within a film are correlated). Removes row-level variance entirely.")
+
+    def paired(oa, ob, n_boot=2000, seed=0):
+        idx = oa.index.intersection(ob.index)
+        s = data.loc[idx]
+        w = EW[data.index.get_indexer(idx)]
+        ea = np.abs(s.y.to_numpy() - oa.loc[idx].clip(lower=0).to_numpy())
+        eb = np.abs(s.y.to_numpy() - ob.loc[idx].clip(lower=0).to_numpy())
+        d = w * (ea - eb)                       # >0 means ob is better
+        mv = s.movie_title.to_numpy()
+        uniq = pd.unique(mv)
+        code = pd.Series(np.arange(len(uniq)), index=uniq).loc[mv].to_numpy()
+        num = np.bincount(code, weights=d, minlength=len(uniq))
+        den = np.bincount(code, weights=w, minlength=len(uniq))
+        rng = np.random.default_rng(seed)
+        pick = rng.integers(0, len(uniq), size=(n_boot, len(uniq)))
+        bs = num[pick].sum(axis=1) / den[pick].sum(axis=1)
+        point = num.sum() / den.sum()
+        lo, hi = np.percentile(bs, [2.5, 97.5])
+        return point, lo, hi, float((bs > 0).mean())
+
+    print("\n  NULL check: same config, two different seeds (true difference is zero)")
+    for kind in FOLD_KINDS:
+        pt, lo, hi, pw = paired(OOF["ff07"][kind][SEEDS[0]], OOF["ff07"][kind][SEEDS[1]])
+        print(f"    {kind:5s} seed {SEEDS[0]} vs {SEEDS[1]}: {pt:+.5f} "
+              f"[{lo:+.5f}, {hi:+.5f}]  P(better) {pw:.2f}")
+
+    print("\n  ff 0.5 vs ff 0.7, seed-averaged over "
+          f"{len(SEEDS)} seeds (what the final model actually does)")
+    for kind in FOLD_KINDS:
+        a = pd.concat([OOF["ff07"][kind][sd] for sd in SEEDS], axis=1).mean(axis=1)
+        b = pd.concat([OOF["ff05"][kind][sd] for sd in SEEDS], axis=1).mean(axis=1)
+        print(f"    {kind:5s} seed-averaged WEIGHTED  ff07 {wscore(a):.5f} | "
+              f"ff05 {wscore(b):.5f}")
+        pt, lo, hi, pw = paired(a, b)
+        sig = "SIGNIFICANT" if lo > 0 else ("significant the WRONG way" if hi < 0
+                                            else "not distinguishable from zero")
+        print(f"    {kind:5s} paired gain for ff05: {pt:+.5f} "
+              f"[{lo:+.5f}, {hi:+.5f}]  -> {sig}")
+
+    print("\n  Read the null row first. Whatever width it shows is the resolution of this")
+    print("  harness; any 'gain' inside that band is noise. If ff05's interval excludes zero")
+    print("  on BOTH schemes it is real, and seed-averaging is worth adopting regardless")
+    print("  because it shrinks exactly this variance.")
+print(f"\n[CELL 23] {time.time() - t0:.1f}s")
 """)
 
 # =================================================================== decision log
