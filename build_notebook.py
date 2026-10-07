@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 13
+NB_VERSION = 14
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -79,12 +79,34 @@ SUBSAMPLE_ROWS = None      # e.g. 200_000 -> subsample training windows for a qu
 # To enable the heavy cells, create local_config.json beside the notebook:
 #     {"run_heavy": true}
 # That file is gitignored, so pulling is always clean and you never edit a cell again.
-_LOCAL = Path("local_config.json")
-_cfg = json.loads(_LOCAL.read_text()) if _LOCAL.exists() else {}
+# Looked for in several places, because a Jupyter kernel's working directory is not
+# necessarily the notebook's directory. An env var wins over the file if both are set.
+_cfg, _cfg_from = {}, None
+for _cand in (Path("local_config.json"),
+              Path.cwd() / "local_config.json",
+              Path(os.environ.get("DATA_DIR", ".")) / "local_config.json",
+              Path.cwd().parent / "local_config.json"):
+    try:
+        if _cand.exists():
+            _cfg, _cfg_from = json.loads(_cand.read_text()), _cand.resolve()
+            break
+    except Exception as _e:
+        print(f"WARNING: {_cand} exists but could not be read ({_e})")
 RUN_HEAVY = bool(_cfg.get("run_heavy", False))
-if not _LOCAL.exists():
-    print('NOTE: no local_config.json -> RUN_HEAVY = False. Create it with'
-          ' {"run_heavy": true} to enable cells 11-20.')
+if "RUN_HEAVY" in os.environ:
+    RUN_HEAVY = os.environ["RUN_HEAVY"].strip().lower() in ("1", "true", "yes")
+    _cfg_from = "environment variable RUN_HEAVY"
+if _cfg_from:
+    print(f"RUN_HEAVY = {RUN_HEAVY}  (from {_cfg_from})")
+else:
+    print(f'RUN_HEAVY = {RUN_HEAVY}  (no local_config.json found in {Path.cwd()} or DATA_DIR)')
+    print('  To enable the heavy cells, put {"run_heavy": true} in local_config.json')
+    print("  beside the notebook, or set the RUN_HEAVY=1 environment variable.")
+    print("  Editing this cell also works but makes `git pull` refuse to update the notebook.")
+
+# Seeds for the final refit. Seed-averaging measurably shrinks the fold noise that
+# CELL 23 quantified (3-seed averaging was worth 0.0014 on the weighted metric).
+N_SEEDS = {"A": 8, "B": 5, "p0": 5}
 
 # ---- v4's invocation: 0.43715.py was run as  final(featset, w_open, paramset) ----
 # Reconstructed from its docstring ("competition features", "127 leaves / min 100", "extra
@@ -2603,8 +2625,8 @@ else:
                 oof[vam] = m.predict(data.loc[vam, feats], num_iteration=m.best_iteration)
             return oof.dropna(), iters
 
-        SPEC = {"A": (params, "reg", 5), "B": (v4.PARAMS_B, "reg", 3),
-                "p0": (params, "clf", 3)}
+        SPEC = {"A": (params, "reg", N_SEEDS["A"]), "B": (v4.PARAMS_B, "reg", N_SEEDS["B"]),
+                "p0": (params, "clf", N_SEEDS["p0"])}
         OO, ITERS = {}, {}
         for nm, (pp, kd, _) in SPEC.items():
             OO[nm], it = {}, []
@@ -3276,6 +3298,179 @@ else:
     print("  on BOTH schemes it is real, and seed-averaging is worth adopting regardless")
     print("  because it shrinks exactly this variance.")
 print(f"\n[CELL 23] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 24 — re-sweep what the old gate could not resolve
+
+CELL 23 measured the noise floor at **0.00151 std**, so a single-seed comparison needs
+**>0.00424** to be distinguishable. Nearly every rejection I recorded was smaller than that:
+
+| candidate | group | time | old verdict | actually |
+|-----------|-------|------|-------------|----------|
+| extra windows | -0.0015 | +0.0016 | reject | **not measured** |
+| lr 0.03 | -0.0014 | -0.0005 | reject | **not measured** |
+| lr 0.08 | -0.0015 | -0.0012 | reject | **not measured** |
+| bagging_fraction 1.0 | +0.0012 | -0.0023 | reject | **not measured** |
+| lambda_l2 5.0 | -0.0000 | -0.0008 | reject | **not measured** |
+| cat_smooth 50 | -0.0035 | +0.0019 | reject | **not measured** |
+| w_open 2.0 vs 1.0 | -0.0015 | -0.0008 | (accepted 1.0) | **not measured** |
+| bundles S, P | -0.003 to -0.005 | | reject | genuinely worse |
+
+`feature_fraction 0.5` was found the same way — invisible at single seed, clearly real
+(+0.0028 on both schemes) once seed-averaged and paired. So there may be more effects of that
+size hiding in the "rejected" list.
+
+This cell re-tests each candidate the way that worked: **3 seeds averaged**, then a **paired
+bootstrap over movies** against the new baseline (which now includes `feature_fraction 0.5`).
+A candidate is adopted only if its 95% interval excludes zero on **both** schemes.
+
+Every (candidate, scheme, seed) model is cached, so the cell is resumable. Each candidate costs
+6 CV runs, roughly 10-12 minutes; the full list is a long run, so start it and come back.
+""")
+code(r"""
+# CELL 24 — PAIRED RE-SWEEP WITH SEED AVERAGING (heavy, resumable, long)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+SWEEP_SEEDS = [2026, 7, 99]
+
+if not RUN_HEAVY:
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
+else:
+    import lightgbm as lgb
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)
+    v3, v4, v5 = P.load_modules_v5(".", verbose=False)
+    data, test = P.get_tables_v5(v3, v4, v5, verbose=False)
+    vp = P.release_mask(data)
+    w_eval, EW, sb = P.scale_weights(data, test, verbose=False)
+    folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+    FEATS = v5.FEAT_F
+    cats = [c for c in v3.CAT_COLS if c in FEATS]
+    BASE_PARAMS = {**v5.P2, "feature_fraction": 0.5}        # ff 0.5 is now the baseline
+    BASE_ROWS, BASE_WOPEN = "base", 1.0
+    print(f"  baseline: {BASE_PARAMS} | windows {BASE_ROWS} | w_open {BASE_WOPEN}")
+
+    def rowmask(which):
+        return (pd.Series(True, index=data.index) if which == "all"
+                else data.window.isin(v3.ALL_OFFSETS))
+
+    def rcv(pp, which_rows, w_open, folds_k, seed):
+        p = {**v3.PARAMS, **pp, "seed": seed, "bagging_seed": seed + 1,
+             "feature_fraction_seed": seed + 2}
+        rows = rowmask(which_rows)
+        wt = np.where(data.window.isin(v3.OPEN_OFFSETS), w_open, 1.0)
+        w_end = data.d1 + pd.Timedelta(days=9)
+        oof = pd.Series(np.nan, index=data.index)
+        for vm, purge in folds_k:
+            in_val = data.movie_title.isin(vm)
+            trm = rows & ~data.bad & ~in_val
+            if purge is not None:
+                trm &= ~((data.d1 <= purge[1]) & (w_end >= purge[0]))
+            vam = vp & in_val
+            dtr = lgb.Dataset(data.loc[trm, FEATS], data.y[trm], weight=wt[trm.to_numpy()],
+                              categorical_feature=cats)
+            dva = lgb.Dataset(data.loc[vam, FEATS], data.y[vam], categorical_feature=cats,
+                              reference=dtr)
+            m = lgb.train(p, dtr, 6000, valid_sets=[dva],
+                          callbacks=[lgb.early_stopping(100, verbose=False)])
+            oof[vam] = m.predict(data.loc[vam, FEATS], num_iteration=m.best_iteration)
+        return oof.dropna()
+
+    import hashlib
+
+    def avg_oof(tag, pp, which_rows, w_open, kind):
+        parts = []
+        for sd in SWEEP_SEEDS:
+            key = hashlib.md5(_json.dumps([sorted(pp.items()), which_rows, w_open, kind, sd],
+                                          default=str).encode()).hexdigest()[:10]
+            f = CACHE_DIR / f"sw_{key}.pkl"
+            if f.exists():
+                parts.append(pd.read_pickle(f))
+            else:
+                _t = time.time()
+                o = rcv(pp, which_rows, w_open, folds[kind], sd)
+                pd.to_pickle(o, f)
+                parts.append(o)
+                print(f"      {tag} {kind} seed {sd} ({time.time() - _t:.0f}s)", flush=True)
+        return pd.concat(parts, axis=1).mean(axis=1)
+
+    def wscore(o):
+        s = data.loc[o.index]
+        e = np.abs(s.y - o.clip(lower=0))
+        w = EW[data.index.get_indexer(o.index)]
+        return float((e * w).sum() / w.sum())
+
+    def paired(oa, ob, n_boot=2000, seed=0):
+        idx = oa.index.intersection(ob.index)
+        s = data.loc[idx]
+        w = EW[data.index.get_indexer(idx)]
+        ea = np.abs(s.y.to_numpy() - oa.loc[idx].clip(lower=0).to_numpy())
+        eb = np.abs(s.y.to_numpy() - ob.loc[idx].clip(lower=0).to_numpy())
+        d = w * (ea - eb)
+        mv = s.movie_title.to_numpy()
+        uniq = pd.unique(mv)
+        code = pd.Series(np.arange(len(uniq)), index=uniq).loc[mv].to_numpy()
+        num = np.bincount(code, weights=d, minlength=len(uniq))
+        den = np.bincount(code, weights=w, minlength=len(uniq))
+        rng = np.random.default_rng(seed)
+        pick = rng.integers(0, len(uniq), size=(n_boot, len(uniq)))
+        bs = num[pick].sum(axis=1) / den[pick].sum(axis=1)
+        lo, hi = np.percentile(bs, [2.5, 97.5])
+        return num.sum() / den.sum(), lo, hi
+
+    line("S0  baseline, seed-averaged")
+    BASE = {k: avg_oof("base", BASE_PARAMS, BASE_ROWS, BASE_WOPEN, k) for k in FOLD_KINDS}
+    for k in FOLD_KINDS:
+        print(f"  {k:5s} WEIGHTED {wscore(BASE[k]):.5f}")
+
+    CANDIDATES = [
+        ("extra windows",        BASE_PARAMS, "all",  BASE_WOPEN),
+        ("w_open 2.0",           BASE_PARAMS, "base", 2.0),
+        ("lr 0.03",              {**BASE_PARAMS, "learning_rate": 0.03}, "base", BASE_WOPEN),
+        ("lr 0.08",              {**BASE_PARAMS, "learning_rate": 0.08}, "base", BASE_WOPEN),
+        ("bagging_fraction 1.0", {**BASE_PARAMS, "bagging_fraction": 1.0}, "base", BASE_WOPEN),
+        ("bagging_fraction 0.6", {**BASE_PARAMS, "bagging_fraction": 0.6}, "base", BASE_WOPEN),
+        ("lambda_l2 5.0",        {**BASE_PARAMS, "lambda_l2": 5.0}, "base", BASE_WOPEN),
+        ("cat_smooth 50",        {**BASE_PARAMS, "cat_smooth": 50}, "base", BASE_WOPEN),
+        ("min_data 50",          {**BASE_PARAMS, "min_data_in_leaf": 50}, "base", BASE_WOPEN),
+        ("min_data 200",         {**BASE_PARAMS, "min_data_in_leaf": 200}, "base", BASE_WOPEN),
+        ("num_leaves 63",        {**BASE_PARAMS, "num_leaves": 63}, "base", BASE_WOPEN),
+        ("num_leaves 255",       {**BASE_PARAMS, "num_leaves": 255}, "base", BASE_WOPEN),
+        ("ff 0.45",              {**BASE_PARAMS, "feature_fraction": 0.45}, "base", BASE_WOPEN),
+        ("ff 0.55",              {**BASE_PARAMS, "feature_fraction": 0.55}, "base", BASE_WOPEN),
+    ]
+
+    line("S1  each candidate vs the baseline, paired bootstrap, 95% CI")
+    print(f"  {'candidate':22s}{'scheme':8s}{'score':>9s}{'gain':>10s}{'95% CI':>22s}  verdict")
+    winners = []
+    for tag, pp, rws, wo in CANDIDATES:
+        rowsout, ok_all = [], True
+        for k in FOLD_KINDS:
+            cand = avg_oof(tag, pp, rws, wo, k)
+            pt, lo, hi = paired(BASE[k], cand)
+            sig = lo > 0
+            if not sig:
+                ok_all = False
+            rowsout.append((k, wscore(cand), pt, lo, hi, sig))
+        for k, sc, pt, lo, hi, sig in rowsout:
+            print(f"  {tag:22s}{k:8s}{sc:9.5f}{pt:+10.5f}"
+                  f"  [{lo:+.5f}, {hi:+.5f}]  {'SIG' if sig else '-'}")
+        print(f"  {'':22s}{'':8s}{'':9s}{'':10s}{'':22s}  "
+              f"-> {'ADOPT' if ok_all else 'reject'}")
+        if ok_all:
+            winners.append((tag, pp, rws, wo))
+    line("S2  summary")
+    if winners:
+        print("  significant on BOTH schemes:")
+        for tag, pp, rws, wo in winners:
+            print(f"    {tag}")
+        print("\n  Add these to results/v5_choice_weighted.json and re-run CELL 20.")
+        print("  If several win, test them TOGETHER before shipping - they may not be additive.")
+    else:
+        print("  nothing beats the baseline at 95% confidence on both schemes.")
+        print("  The ff 0.5 baseline stands; hyperparameter search is exhausted.")
+print(f"\n[CELL 24] {time.time() - t0:.1f}s")
 """)
 
 # =================================================================== decision log
