@@ -49,6 +49,8 @@ pd.set_option("display.max_rows", 120)
 
 SEED           = 2026
 N_JOBS         = max(1, (os.cpu_count() or 4) - 1)
+FOLD_KINDS     = ("group", "time")   # v3's two CV schemes; "time" is the gate
+import json as _json                 # cells 11-20 write resumable state as json
 SUBSAMPLE_ROWS = None      # e.g. 200_000 -> subsample training windows for a quick run
 RUN_HEAVY      = False     # OFF by default. Flip to True on your own machine only.
                            # Gates cells 11-14 (LightGBM CV + the submission). Each one
@@ -1155,7 +1157,8 @@ code(r"""
 t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 import json as _json
-import v5_pipeline as P          # shared setup; keeps every heavy cell independently runnable
+import importlib, v5_pipeline
+P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy          # shared setup; keeps every heavy cell independently runnable
 
 FOLD_KINDS = ("group", "time")
 
@@ -1281,7 +1284,8 @@ if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
     import lightgbm as lgb
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     v3, v4 = P.load_modules(".", verbose=False)
     data, test = P.get_tables(v3, v4, verbose=False)
     vp = (data.window == 0) & ~data.bad
@@ -1389,7 +1393,8 @@ import itertools
 if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     v3, v4 = P.load_modules(".", verbose=False)
     data, test = P.get_tables(v3, v4, verbose=False)
     vp = (data.window == 0) & ~data.bad
@@ -1510,7 +1515,8 @@ line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     v3, v4 = P.load_modules(".", verbose=False)
     data, test = P.get_tables(v3, v4, verbose=False)
     vp = P.release_mask(data)
@@ -1645,7 +1651,8 @@ PAIR = ["movie_title", "cinema_ids"]
 if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     v3, v4 = P.load_modules(".", verbose=False)
     data, test = P.get_tables(v3, v4, verbose=False)
     vp = P.release_mask(data)
@@ -1793,7 +1800,8 @@ line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     v3, v4 = P.load_modules(".", verbose=False)
     data, test = P.get_tables(v3, v4, verbose=False)
     vp = P.release_mask(data)
@@ -1967,7 +1975,8 @@ line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     v3, v4 = P.load_modules(".", verbose=False)
     data, test = P.get_tables(v3, v4, verbose=False)
     vp = P.release_mask(data)
@@ -2256,7 +2265,8 @@ if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
     import lightgbm as lgb
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     v3, v4, v5 = P.load_modules_v5(".")
     data, test = P.get_tables_v5(v3, v4, v5)
     vp = P.release_mask(data)
@@ -2417,7 +2427,8 @@ if not RUN_HEAVY:
     print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
     import lightgbm as lgb
-    import v5_pipeline as P
+    import importlib, v5_pipeline
+    P = importlib.reload(v5_pipeline)  # never trust Jupyter's cached copy
     _cp = OUT_DIR / "v5_choice_weighted.json"
     if not _cp.exists():
         print("results/v5_choice_weighted.json missing -> run CELL 19 first")
