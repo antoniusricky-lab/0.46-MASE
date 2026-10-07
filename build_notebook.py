@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 14
+NB_VERSION = 15
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -2737,6 +2737,18 @@ else:
         _cfg_label = ch.get("cfg_label", ch.get("name", "?"))
         _fn = f"submission_v5c_{CFG}.csv"
         v4.write_sub(_fn, test, ratio, test.scale.to_numpy())
+        # Save the ratios and the calendar masks so CELL 25 can build probe variants
+        # without retraining anything.
+        _d1, _dt = test.d1, test.date_show
+        _leb = (_dt.between("2026-03-21", "2026-03-27") & (_d1 <= "2026-03-18")).to_numpy()
+        _inram = lambda d: d.between(*v4.RAMADAN).to_numpy().astype(float)
+        _ram_exp = _inram(_dt) * (1 - sum(_inram(_d1 + pd.Timedelta(days=k))
+                                          for k in range(3)) / 3)
+        pd.DataFrame({"id": test.id, "ratio": ratio, "scale": test.scale.to_numpy(),
+                      "h": test.h.to_numpy(), "leb": _leb.astype(int),
+                      "ram_exp": _ram_exp}).to_csv(f"v5_test_pred_{CFG}.csv", index=False)
+        print(f"  saved v5_test_pred_{CFG}.csv | Lebaran-week rows {int(_leb.sum()):,} "
+              f"({_leb.mean():.2%}) | Ramadan-transition rows {int((_ram_exp > 0).sum()):,}")
         _ledger_p = OUT_DIR / "submission_ledger.json"
         _ledger = _json.loads(_ledger_p.read_text()) if _ledger_p.exists() else {}
         _ledger[_fn] = dict(group_post=float(post_group),
@@ -3471,6 +3483,106 @@ else:
         print("  nothing beats the baseline at 95% confidence on both schemes.")
         print("  The ff 0.5 baseline stands; hyperparameter search is exhausted.")
 print(f"\n[CELL 24] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 25 — the Lebaran probe: the last lever, and an honest bet
+
+Offline search is finished. CELL 24 rejected all fourteen remaining hyperparameter candidates
+with proper statistics, features were exhausted earlier, and post-processing is at its optimum.
+The proxy cannot resolve anything below ~0.002 (three LB readings give offsets of 0.00848,
+0.00893, 0.00725).
+
+One quantity has never been measured, and it **cannot** be measured offline. `train.csv` begins on
+2025-04-01, which is Eid+1, so **no training window has its observation days before Eid and its
+target days after**. The 2026 cohort is exactly that shape: 7 films open 2026-03-18, their D1-D3
+falls at the end of Ramadan when demand is low, and their D4-D10 lands in Idulfitri week when it
+is high. 4,417 rows, 6.08% of the test set.
+
+What is known:
+
+- the model predicts a mean ratio near **1.09** on those rows;
+- CELL 8 measured the Eid market ratio at **1.52-2.41** (mean ~2.1) from the 2025 aftermath, and
+  normal decay is ~0.5, giving an expected ratio of about **1.05** — which is what the model
+  already does;
+- but `FINDINGS.md` measured train's Eid-window rows at a median `y/scale` of **1.88** against
+  0.357 on ordinary days.
+
+Those two readings disagree, and no offline experiment can break the tie. CELL 7 bounded the
+recoverable MASE at **0.0058** (if the model is already right) up to **0.0552** (if the true ratio
+is 2.0).
+
+**So this is a bet, not an analysis.** The risk is close to symmetric: at a 1.4x multiplier,
+roughly **+0.025 if the truth is 1.5x, and -0.027 if the model is already correct**. A 1.2x
+multiplier halves both tails. The cell writes several multipliers so you can spend one submission
+on the smallest informative step rather than the biggest one.
+
+Needs `v5_test_pred_<fingerprint>.csv` from CELL 20. No training, runs in seconds.
+""")
+code(r"""
+# CELL 25 — LEBARAN / RAMADAN PROBE VARIANTS (no training)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+LEB_MULTS = [1.2, 1.4]        # Lebaran-week multiplier to probe
+RAM_MULTS = [1.0]             # 1.0 = leave Ramadan alone; 0.85 damps it
+
+_preds = sorted(Path(".").glob("v5_test_pred_*.csv"))
+if not _preds:
+    print("no v5_test_pred_*.csv found -> run CELL 20 first (it saves one per config)")
+else:
+    _src = _preds[-1] if len(_preds) == 1 else None
+    if _src is None:
+        print("several prediction files found; set _src to the one you want:")
+        for f in _preds:
+            print(f"    {f.name}")
+        _src = _preds[-1]
+        print(f"  using {_src.name}")
+    p = pd.read_csv(_src)
+    _tag = _src.stem.replace("v5_test_pred_", "")
+    print(f"  source {_src.name} | rows {len(p):,}")
+    print(f"  Lebaran-week rows {int(p.leb.sum()):,} ({p.leb.mean():.2%}) | "
+          f"Ramadan-transition rows {int((p.ram_exp > 0).sum()):,}")
+
+    line("P1  what the model currently predicts on the Lebaran cohort")
+    _l = p[p.leb == 1]
+    if len(_l):
+        print(_l.groupby("h").ratio.agg(rows="size", mean="mean", median="median")
+              .round(4).to_string())
+        print(f"\n  cohort mean ratio {_l.ratio.mean():.4f} | zeros {(_l.ratio == 0).mean():.2%}")
+        print("  CELL 8 measured the Eid market ratio at 1.52-2.41; normal decay is ~0.5,")
+        print("  so 0.5 x 2.1 = ~1.05 expected. The model is already close to that, which is")
+        print("  the case for NOT applying a multiplier. FINDINGS.md's 1.88 median is the case")
+        print("  for applying one. Nothing offline can settle it.")
+    else:
+        print("  no Lebaran rows flagged - check the date logic before probing")
+
+    line("P2  write the probe variants")
+    for lm in LEB_MULTS:
+        for rm in RAM_MULTS:
+            r = p.ratio.to_numpy() * np.where(p.leb == 1, lm, 1.0) * rm ** p.ram_exp.to_numpy()
+            nm = f"submission_probe_leb{lm}_ram{rm}_{_tag}.csv"
+            v = np.floor(np.clip(r, 0, None) * p.scale.to_numpy() + 0.5).astype(int)
+            pd.DataFrame({"id": p.id, "total_ticket": v}).to_csv(nm, index=False)
+            _base = np.floor(np.clip(p.ratio.to_numpy(), 0, None)
+                             * p.scale.to_numpy() + 0.5).astype(int)
+            _chg = (v != _base)
+            print(f"  {nm}")
+            print(f"    rows changed {int(_chg.sum()):,} ({_chg.mean():.2%}) | "
+                  f"tickets {_base.sum():,} -> {v.sum():,}")
+
+    line("P3  how to read the result")
+    print("  Submit ONE variant and compare against the unmodified file's score.")
+    print("  The Lebaran rows are 6.08% of the test set, so with a 30% public split about")
+    print("  1,300 of them are scored - enough to move the number measurably.")
+    print()
+    print("  If leb1.2 IMPROVES the score: the model under-predicts Eid week. Try 1.4, and")
+    print("    the direction is confirmed for the private split too.")
+    print("  If leb1.2 WORSENS it: the model was already right, stop. Do not try 1.4.")
+    print()
+    print("  Spend the 1.2 probe first. It is the smaller bet and it answers the same")
+    print("  question as 1.4, which only doubles the stake.")
+print(f"\n[CELL 25] {time.time() - t0:.1f}s")
 """)
 
 # =================================================================== decision log
