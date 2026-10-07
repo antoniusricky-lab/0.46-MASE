@@ -1,7 +1,21 @@
 """Generates cinema_v5.ipynb. Run:  python build_notebook.py"""
+import datetime
 import json
+import subprocess
 
 NB = "cinema_v5.ipynb"
+
+# Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
+# header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
+NB_VERSION = 9
+NEEDS_PIPELINE = 3
+_d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+try:
+    _c = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                        text=True, timeout=10).stdout.strip() or "unknown"
+except Exception:
+    _c = "unknown"
+STAMP = f"v{NB_VERSION} | built {_d} | parent commit {_c}"
 cells = []
 
 
@@ -15,9 +29,16 @@ def code(text):
 
 
 # ======================================================================= intro
-md(r"""
-# Cinema ticket forecasting — v5 working notebook
+md("# Cinema ticket forecasting — v5 working notebook\n\n"
+   "> ## NOTEBOOK BUILD " + STAMP + "\n"
+   "> Requires `v5_pipeline.py` VERSION >= " + str(NEEDS_PIPELINE) + ". CELL 1 reprints this\n"
+   "> stamp and CELL 2 verifies the helper version. **If the stamp does not match what I told\n"
+   "> you to run, pull again and reopen the notebook — VS Code caches the file and will not\n"
+   "> reread it on its own.**\n>\n"
+   "> `RUN_HEAVY` is read from `local_config.json` (gitignored), so this notebook is never\n"
+   "> hand-edited and `git pull` stays clean. Enable heavy cells with `{\"run_heavy\": true}`.\n")
 
+md(r"""
 **Goal:** close the gap from LB 0.43715 to the 0.34456 leader.
 
 **How to use:** every cell is independent once `CELL 1`-`CELL 3` have run. Cells are named
@@ -112,6 +133,10 @@ def find_file(stem):
 
 
 STEMS = ["train", "test_history", "test", "sample_submission", "movies", "holidays", "ticket_prices"]
+print("=" * 78)
+print("NOTEBOOK BUILD __NB_STAMP__")
+print("  requires v5_pipeline.VERSION >= __NB_NEEDS__   (CELL 2 verifies this)")
+print("=" * 78)
 print("CONFIG ok")
 print("  DATA_DIR =", DATA_DIR.resolve())
 for _s in STEMS:
@@ -3139,6 +3164,10 @@ def _audit(cells):
                          + "\n  use df[\"col\"] instead, or rename the column.")
     print(f"audit ok: {len(assigned)} column names, none shadowed by attribute access")
 
+
+for _cell in cells:
+    _cell["source"] = [ln.replace("__NB_STAMP__", STAMP).replace("__NB_NEEDS__", str(NEEDS_PIPELINE))
+                       for ln in _cell["source"]]
 
 _audit(cells)
 
