@@ -1,0 +1,7 @@
+cache/
+.ipynb_checkpoints/
+local_config.json
+*.pyc
+__pycache__/
+results/
+submissions/
