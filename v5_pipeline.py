@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+VERSION = 3          # bump when the public API changes; CELL 2 checks it
 CACHE_DIR = Path("cache")
 SCALE_EDGES = [0, 2, 5, 10, 25, 50, 100, 250, 1e9]
 SCALE_LABELS = ["<=2", "2-5", "5-10", "10-25", "25-50", "50-100", "100-250", ">250"]

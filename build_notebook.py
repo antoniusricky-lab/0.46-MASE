@@ -52,9 +52,18 @@ N_JOBS         = max(1, (os.cpu_count() or 4) - 1)
 FOLD_KINDS     = ("group", "time")   # v3's two CV schemes; "time" is the gate
 import json as _json                 # cells 11-20 write resumable state as json
 SUBSAMPLE_ROWS = None      # e.g. 200_000 -> subsample training windows for a quick run
-RUN_HEAVY      = False     # OFF by default. Flip to True on your own machine only.
-                           # Gates cells 11-14 (LightGBM CV + the submission). Each one
-                           # caches to cache/ and results/, so re-running resumes.
+# ---- RUN_HEAVY lives in local_config.json, NOT in this notebook ----------------
+# Editing the notebook to flip this makes `git pull` refuse to update it, which is how
+# a stale cell survives a pull and then fails with a confusing AttributeError.
+# To enable the heavy cells, create local_config.json beside the notebook:
+#     {"run_heavy": true}
+# That file is gitignored, so pulling is always clean and you never edit a cell again.
+_LOCAL = Path("local_config.json")
+_cfg = json.loads(_LOCAL.read_text()) if _LOCAL.exists() else {}
+RUN_HEAVY = bool(_cfg.get("run_heavy", False))
+if not _LOCAL.exists():
+    print('NOTE: no local_config.json -> RUN_HEAVY = False. Create it with'
+          ' {"run_heavy": true} to enable cells 11-20.')
 
 # ---- v4's invocation: 0.43715.py was run as  final(featset, w_open, paramset) ----
 # Reconstructed from its docstring ("competition features", "127 leaves / min 100", "extra
@@ -159,6 +168,26 @@ except Exception as e:
     print("  symbols v4 needs from it:", ", ".join(V3_SYMBOLS))
     HAVE_V3 = False
 print("HAVE_V3 =", HAVE_V3)
+
+# ---- staleness guard --------------------------------------------------------
+# If the notebook and v5_pipeline.py are out of step (a pull that did not reach the
+# kernel, or an editor still holding the old file), say so here instead of letting a
+# later cell die on AttributeError.
+try:
+    import importlib, v5_pipeline
+    _P = importlib.reload(v5_pipeline)
+    _need = 3
+    _have = getattr(_P, "VERSION", 0)
+    print(f"v5_pipeline VERSION {_have} (this notebook wants >= {_need})")
+    assert _have >= _need, (
+        f"v5_pipeline.py is version {_have} but this notebook needs {_need}. "
+        "Pull again, then close and reopen the notebook so the editor rereads it.")
+    for _fn in ("load_modules", "load_modules_v5", "get_tables", "get_tables_v5",
+                "scale_weights", "make_wmase", "fit_post_weighted", "apply_post"):
+        assert hasattr(_P, _fn), f"v5_pipeline.py is missing {_fn}() - stale copy"
+    print("v5_pipeline: all required functions present")
+except ImportError:
+    print("v5_pipeline.py not found - it must sit beside this notebook")
 print(f"\n[CELL 2] {time.time() - t0:.1f}s")
 """)
 
