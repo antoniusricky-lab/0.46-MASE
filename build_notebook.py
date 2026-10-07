@@ -2349,10 +2349,21 @@ else:
     LOG_PATH = OUT_DIR / "v5_weighted_log.json"
     LOG = _json.loads(LOG_PATH.read_text()) if LOG_PATH.exists() else {}
 
-    def cv(name, feats, params, rows, w_open=2.0):
-        # cached per (name); returns dict with plain/weighted per scheme and the means
-        if name in LOG:
-            r = LOG[name]
+    def sig(feats, params, rows, w_open):
+        # cache key over the FULL configuration. Keying on the display name alone let a
+        # re-run with a different w_open silently return the previous w_open's result.
+        import hashlib
+        raw = _json.dumps([sorted(feats), sorted(params.items()),
+                           "all" if rows is ALL_ROWS else "base", w_open], default=str)
+        return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+    def cv(name, feats, params, rows, w_open):
+        key = sig(feats, params, rows, w_open)
+        if key in LOG:
+            r = LOG[key]
+            print(f"  {name:32s} (cached) mean plain {r['mean_plain']:.5f} | "
+                  f"mean WEIGHTED {r['mean_weighted']:.5f}")
+            return r
         else:
             r = {}
             for k in FOLD_KINDS:
@@ -2369,16 +2380,27 @@ else:
             r["params"] = params
             r["rows"] = "all" if rows is ALL_ROWS else "base"
             r["w_open"] = w_open
-            LOG[name] = r
+            r["cfg_name"] = name
+            LOG[key] = r
             LOG_PATH.write_text(_json.dumps(LOG, indent=1, default=float))
         print(f"  {name:32s} mean plain {r['mean_plain']:.5f} | "
               f"mean WEIGHTED {r['mean_weighted']:.5f}")
         return r
 
-    line("V1  stage A: v4 baseline, then each new bundle, selected on WEIGHTED")
-    best_name, best_feats = "v4 (F, P2)", v5.FEAT_F
-    best = cv(best_name, v5.FEAT_F, v5.P2, BASE_ROWS)
-    single = {n: cv(f"F + {n}", v5.FEAT_F + b, v5.P2, BASE_ROWS)
+    line("V1a  stage 0: pick w_open FIRST, on the baseline")
+    print("  v5's run_cv passes no sample weight at all (w_open = 1.0), while v4 used 2.0.")
+    print("  Testing bundles at the wrong w_open is what invalidated the first run of this")
+    print("  cell, so the weighting is settled before anything else.")
+    wo_runs = {wo: cv(f"v4 (F, P2) wopen{wo}", v5.FEAT_F, v5.P2, BASE_ROWS, wo)
+               for wo in (1.0, 2.0, 3.0)}
+    wo_sel = min(wo_runs, key=lambda w: wo_runs[w]["mean_weighted"])
+    print(f"  stage 0 choice: w_open = {wo_sel} "
+          f"(WEIGHTED {wo_runs[wo_sel]['mean_weighted']:.5f})")
+
+    line("V1b  stage A: each new bundle, at the chosen w_open, selected on WEIGHTED")
+    best_name, best_feats = f"v4 (F, P2) wopen{wo_sel}", v5.FEAT_F
+    best = wo_runs[wo_sel]
+    single = {n: cv(f"F + {n} wopen{wo_sel}", v5.FEAT_F + b, v5.P2, BASE_ROWS, wo_sel)
               for n, b in v5.BUNDLES.items()}
     wins_w = [n for n in v5.BUNDLES if single[n]["mean_weighted"] < best["mean_weighted"]]
     wins_p = [n for n in v5.BUNDLES if single[n]["mean_plain"] < best["mean_plain"]]
@@ -2387,33 +2409,31 @@ else:
           f"{'   <-- the two metrics disagree' if set(wins_w) != set(wins_p) else ''}")
     cands = {f"F + {n}": single[n] for n in wins_w}
     if len(wins_w) > 1:
-        nm = "F + " + " + ".join(wins_w)
+        nm = "F + " + " + ".join(wins_w) + f" wopen{wo_sel}"
         ft = v5.FEAT_F + [c for n in wins_w for c in v5.BUNDLES[n]]
-        cands[nm] = cv(nm, ft, v5.P2, BASE_ROWS)
+        cands[nm] = cv(nm, ft, v5.P2, BASE_ROWS, wo_sel)
     if cands:
         best_name = min(cands, key=lambda n: cands[n]["mean_weighted"])
         best = cands[best_name]
         best_feats = best["feats"]
     print(f"  stage A choice: {best_name} (WEIGHTED {best['mean_weighted']:.5f})")
 
-    line("V2  stage B: extra training windows")
-    r = cv(best_name + " + windows", best_feats, v5.P2, ALL_ROWS)
+    line("V2  stage B: extra training windows, at the chosen w_open")
+    r = cv(best_name + " + windows", best_feats, v5.P2, ALL_ROWS, wo_sel)
     rows_sel = ALL_ROWS if r["mean_weighted"] < best["mean_weighted"] else BASE_ROWS
     if r["mean_weighted"] < best["mean_weighted"]:
         best, best_name = r, best_name + " + windows"
     print(f"  stage B choice: windows "
           f"{'all' if rows_sel is ALL_ROWS else 'base'} (WEIGHTED {best['mean_weighted']:.5f})")
 
-    line("V3  stage C: learning rate 0.03, and stage D: opening-window weight")
+    line("V3  stage C: learning rate, at the chosen w_open and windows")
     params_sel = dict(v5.P2)
-    r = cv(best_name + " + lr003", best_feats, {**v5.P2, "learning_rate": 0.03}, rows_sel)
-    if r["mean_weighted"] < best["mean_weighted"]:
-        params_sel, best, best_name = {**v5.P2, "learning_rate": 0.03}, r, best_name + " + lr003"
-    wo_sel = 2.0
-    for wo in (1.0, 3.0):
-        r = cv(f"{best_name} + wopen{wo}", best_feats, params_sel, rows_sel, w_open=wo)
+    for lr in (0.03, 0.08):
+        r = cv(f"{best_name} + lr{lr}", best_feats, {**v5.P2, "learning_rate": lr},
+               rows_sel, wo_sel)
         if r["mean_weighted"] < best["mean_weighted"]:
-            wo_sel, best, best_name = wo, r, f"{best_name} + wopen{wo}"
+            params_sel, best = {**v5.P2, "learning_rate": lr}, r
+            best_name = f"{best_name} + lr{lr}"
     print(f"  final: {best_name}")
     print(f"    params {params_sel} | windows {'all' if rows_sel is ALL_ROWS else 'base'} "
           f"| w_open {wo_sel}")
