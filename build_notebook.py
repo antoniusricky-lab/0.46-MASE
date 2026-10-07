@@ -50,7 +50,16 @@ pd.set_option("display.max_rows", 120)
 SEED           = 2026
 N_JOBS         = max(1, (os.cpu_count() or 4) - 1)
 SUBSAMPLE_ROWS = None      # e.g. 200_000 -> subsample training windows for a quick run
-RUN_HEAVY      = False     # gate for anything that takes more than ~3 minutes
+RUN_HEAVY      = False     # OFF by default. Flip to True on your own machine only.
+                           # Gates cells 11-14 (LightGBM CV + the submission). Each one
+                           # caches to cache/ and results/, so re-running resumes.
+
+# ---- v4's invocation: 0.43715.py was run as  final(featset, w_open, paramset) ----
+# Reconstructed from its docstring ("competition features", "127 leaves / min 100", "extra
+# weight on opening-week windows"); reproduces the reported CV to ~0.005. V5_FS is the
+# featset that won under the test-mix-weighted metric (CELL 14), which is what to ship.
+V4_FS, V4_WOPEN, V4_PS = "H", 2.0, "P2"
+V5_FS = "F"
 
 # ---- paths: set DATA_DIR if the csv files live somewhere else ----------------
 DATA_DIR  = Path(os.environ.get("DATA_DIR", "."))
@@ -598,89 +607,93 @@ def find_sub(path=None):
         if c.exists():
             return c
     hits = sorted(Path(".").glob("submission*.csv")) + sorted(SUB_DIR.glob("submission*.csv"))
-    if hits:
-        return hits[0]
-    raise FileNotFoundError("put submission_v4.csv beside the notebook, or set SUB_PATH")
+    return hits[0] if hits else None
 
 
 _p = find_sub(SUB_PATH)
-sub = pd.read_csv(_p)
-print("diagnosing:", _p.resolve(), "|", sub.shape)
-assert sub.id.equals(test.id), "submission id order does not match test.csv"
+HAVE_SUB = _p is not None
+if not HAVE_SUB:
+    print("No submission csv found, so this cell has nothing to diagnose.")
+    print("Put submission_v4.csv beside the notebook (or set SUB_PATH in CELL 1) and re-run.")
+    print("CELLS 8 and 11-14 do not need it; CELL 10 does.")
+sub = pd.read_csv(_p) if HAVE_SUB else None
+if HAVE_SUB:
+    print("diagnosing:", _p.resolve(), "|", sub.shape)
+    assert sub.id.equals(test.id), "submission id order does not match test.csv"
 
-scale_off = hitung_skala(th)
-D = pd.DataFrame({"h": test.off.to_numpy(), "d1": test.d1.to_numpy(),
-                  "date": test.date_show.to_numpy(),
-                  "scale": test.join(scale_off, on=["movie_title", "cinema_ids"]).scale.to_numpy(),
-                  "pred": sub.total_ticket.to_numpy().astype(float)})
-D["ratio"] = D.pred / D.scale
-_rg = regime(D.date)
-D["label"], D["eid_k"] = _rg.label.to_numpy(), _rg.eid_k.to_numpy()
-_ap = CACHE_DIR / "test_pair_patterns.pkl"
-if _ap.exists():
-    D["pattern"] = test.join(pd.read_pickle(_ap).pattern,
-                             on=["movie_title", "cinema_ids"]).pattern.to_numpy()
-else:
-    D["pattern"] = "?"
-_zs = lambda v: float((v == 0).mean())
+    scale_off = hitung_skala(th)
+    D = pd.DataFrame({"h": test.off.to_numpy(), "d1": test.d1.to_numpy(),
+                      "date": test.date_show.to_numpy(),
+                      "scale": test.join(scale_off, on=["movie_title", "cinema_ids"]).scale.to_numpy(),
+                      "pred": sub.total_ticket.to_numpy().astype(float)})
+    D["ratio"] = D.pred / D.scale
+    _rg = regime(D.date)
+    D["label"], D["eid_k"] = _rg.label.to_numpy(), _rg.eid_k.to_numpy()
+    _ap = CACHE_DIR / "test_pair_patterns.pkl"
+    if _ap.exists():
+        D["pattern"] = test.join(pd.read_pickle(_ap).pattern,
+                                 on=["movie_title", "cinema_ids"]).pattern.to_numpy()
+    else:
+        D["pattern"] = "?"
+    _zs = lambda v: float((v == 0).mean())
 
-# ------------------------------------------------------- S1 profile by horizon
-line("S1  predicted profile by horizon")
-print(D.groupby("h").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
-                         median_ratio=("ratio", "median"), zero_share=("pred", _zs),
-                         mean_tickets=("pred", "mean")).round(4).to_string())
-print(f"\noverall mean ratio {D.ratio.mean():.4f} | zero share {(D.pred == 0).mean():.2%}"
-      f" | total tickets {int(D.pred.sum()):,}")
+    # ------------------------------------------------------- S1 profile by horizon
+    line("S1  predicted profile by horizon")
+    print(D.groupby("h").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                             median_ratio=("ratio", "median"), zero_share=("pred", _zs),
+                             mean_tickets=("pred", "mean")).round(4).to_string())
+    print(f"\noverall mean ratio {D.ratio.mean():.4f} | zero share {(D.pred == 0).mean():.2%}"
+          f" | total tickets {int(D.pred.sum()):,}")
 
-# ------------------------------------------------------- S2 profile by regime
-line("S2  predicted profile by target regime")
-print(D.groupby("label").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
-                             median_ratio=("ratio", "median"),
-                             zero_share=("pred", _zs)).round(4).to_string())
+    # ------------------------------------------------------- S2 profile by regime
+    line("S2  predicted profile by target regime")
+    print(D.groupby("label").agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                                 median_ratio=("ratio", "median"),
+                                 zero_share=("pred", _zs)).round(4).to_string())
 
-# ----------------------------------------------------------- S3 the Eid cohort
-line("S3  THE EID COHORT (D1 = 2026-03-18)")
-coh = D[D.label == "eid_week"]
-print("cohort D1 dates:", sorted({str(x.date()) for x in coh.d1}))
-print(f"cohort rows {len(coh):,} ({len(coh) / len(D):.2%} of test) | pairs {len(coh) // 7}")
-print(coh.groupby("h").agg(eid_k=("eid_k", "first"), rows=("ratio", "size"),
-                           mean_ratio=("ratio", "mean"), median_ratio=("ratio", "median"),
-                           zero_share=("pred", _zs), mean_tickets=("pred", "mean"))
-      .round(4).to_string())
-print(f"\ncohort mean predicted ratio over D4-D10 : {coh.ratio.mean():.4f}")
-print(f"cohort rows predicted exactly 0         : {int((coh.pred == 0).sum()):,}"
-      f" ({(coh.pred == 0).mean():.2%})")
-print("\nMASE recoverable if the true cohort ratio is a flat r  (= sum|r - pred| / 72611):")
-for _r in (1.0, 1.25, 1.5, 2.0, 2.5):
-    print(f"   r = {_r:4.2f}  ->  {np.abs(_r - coh.ratio).sum() / len(D):.4f}")
-_z = coh[coh.pred == 0]
-print(f"\n...of which the {len(_z):,} rows currently predicted 0 alone account for:")
-for _r in (1.0, 1.5, 2.0):
-    print(f"   r = {_r:4.2f}  ->  {_r * len(_z) / len(D):.4f}")
+    # ----------------------------------------------------------- S3 the Eid cohort
+    line("S3  THE EID COHORT (D1 = 2026-03-18)")
+    coh = D[D.label == "eid_week"]
+    print("cohort D1 dates:", sorted({str(x.date()) for x in coh.d1}))
+    print(f"cohort rows {len(coh):,} ({len(coh) / len(D):.2%} of test) | pairs {len(coh) // 7}")
+    print(coh.groupby("h").agg(eid_k=("eid_k", "first"), rows=("ratio", "size"),
+                               mean_ratio=("ratio", "mean"), median_ratio=("ratio", "median"),
+                               zero_share=("pred", _zs), mean_tickets=("pred", "mean"))
+          .round(4).to_string())
+    print(f"\ncohort mean predicted ratio over D4-D10 : {coh.ratio.mean():.4f}")
+    print(f"cohort rows predicted exactly 0         : {int((coh.pred == 0).sum()):,}"
+          f" ({(coh.pred == 0).mean():.2%})")
+    print("\nMASE recoverable if the true cohort ratio is a flat r  (= sum|r - pred| / 72611):")
+    for _r in (1.0, 1.25, 1.5, 2.0, 2.5):
+        print(f"   r = {_r:4.2f}  ->  {np.abs(_r - coh.ratio).sum() / len(D):.4f}")
+    _z = coh[coh.pred == 0]
+    print(f"\n...of which the {len(_z):,} rows currently predicted 0 alone account for:")
+    for _r in (1.0, 1.5, 2.0):
+        print(f"   r = {_r:4.2f}  ->  {_r * len(_z) / len(D):.4f}")
 
-# -------------------------------------------- S4 why a multiplier cannot work
-line("S4  what a pure multiplier does to the cohort (v4 shipped x1.6)")
-for _m in (1.0, 1.6, 2.0, 3.0):
-    _p2 = np.floor(coh.ratio.to_numpy() * _m * coh.scale.to_numpy() + 0.5)
-    print(f"  x{_m:<4} -> cohort mean ratio {(_p2 / coh.scale.to_numpy()).mean():.4f}"
-          f" | zeros {(_p2 == 0).mean():.2%}")
-print("\nreading: zeros are fixed points of multiplication. Whatever share of the cohort is")
-print("already 0 cannot be moved by scaling, so the x1.6 probe could never reach a ratio > 1.")
+    # -------------------------------------------- S4 why a multiplier cannot work
+    line("S4  what a pure multiplier does to the cohort (v4 shipped x1.6)")
+    for _m in (1.0, 1.6, 2.0, 3.0):
+        _p2 = np.floor(coh.ratio.to_numpy() * _m * coh.scale.to_numpy() + 0.5)
+        print(f"  x{_m:<4} -> cohort mean ratio {(_p2 / coh.scale.to_numpy()).mean():.4f}"
+              f" | zeros {(_p2 == 0).mean():.2%}")
+    print("\nreading: zeros are fixed points of multiplication. Whatever share of the cohort is")
+    print("already 0 cannot be moved by scaling, so the x1.6 probe could never reach a ratio > 1.")
 
-# ------------------------------------------------ S5/S6 leverage concentration
-line("S5  by D1-D3 activity pattern")
-print(D.groupby("pattern").agg(rows=("ratio", "size"), med_scale=("scale", "median"),
-                               mean_ratio=("ratio", "mean"),
-                               zero_share=("pred", _zs)).round(4).to_string())
-line("S6  by scale bucket, with the share of the metric each bucket controls")
-D["sb"] = pd.cut(D.scale, [0, 2, 5, 10, 25, 50, 100, 1e9],
-                 labels=["<=2", "<=5", "<=10", "<=25", "<=50", "<=100", ">100"])
-_g6 = D.groupby("sb", observed=False).agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
-                                          zero_share=("pred", _zs),
-                                          lev=("scale", lambda v: float((1.0 / v).sum())))
-_g6["leverage_share"] = _g6.lev / float((1.0 / D.scale).sum())
-print(_g6.drop(columns="lev").round(4).to_string())
-D.to_pickle(CACHE_DIR / "sub_diag.pkl")
+    # ------------------------------------------------ S5/S6 leverage concentration
+    line("S5  by D1-D3 activity pattern")
+    print(D.groupby("pattern").agg(rows=("ratio", "size"), med_scale=("scale", "median"),
+                                   mean_ratio=("ratio", "mean"),
+                                   zero_share=("pred", _zs)).round(4).to_string())
+    line("S6  by scale bucket, with the share of the metric each bucket controls")
+    D["sb"] = pd.cut(D.scale, [0, 2, 5, 10, 25, 50, 100, 1e9],
+                     labels=["<=2", "<=5", "<=10", "<=25", "<=50", "<=100", ">100"])
+    _g6 = D.groupby("sb", observed=False).agg(rows=("ratio", "size"), mean_ratio=("ratio", "mean"),
+                                              zero_share=("pred", _zs),
+                                              lev=("scale", lambda v: float((1.0 / v).sum())))
+    _g6["leverage_share"] = _g6.lev / float((1.0 / D.scale).sum())
+    print(_g6.drop(columns="lev").round(4).to_string())
+    D.to_pickle(CACHE_DIR / "sub_diag.pkl")
 print(f"\n[CELL 7] {time.time() - t0:.1f}s")
 """)
 
@@ -1014,88 +1027,92 @@ t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 _DOW = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
 
-G = pd.read_pickle(CACHE_DIR / "release_anchored_grid.pkl")
-D = pd.read_pickle(CACHE_DIR / "sub_diag.pkl")
-# real data gives ~1000-3200 true rows per (horizon x dow); a synthetic fixture gives single digits
-MIN_TRUE = MIN_PRED = 150 if len(G) > 10_000 else 5
-D["d1_dow"] = pd.DatetimeIndex(D.d1).dayofweek
-Gp = G[(G.lab == "ordinary") & (G.lab_d1 == "ordinary")]
-Dp = D[D.label == "ordinary"]
-print(f"true grid (ordinary) {len(Gp):,} rows | v4 preds (ordinary) {len(Dp):,} rows")
+if not (CACHE_DIR / "sub_diag.pkl").exists():
+    print("cache/sub_diag.pkl missing -> run CELL 7 with submission_v4.csv present.")
+    print("This cell compares that submission against the release-anchored truth.")
+else:
+    G = pd.read_pickle(CACHE_DIR / "release_anchored_grid.pkl")
+    D = pd.read_pickle(CACHE_DIR / "sub_diag.pkl")
+    # real data gives ~1000-3200 true rows per (horizon x dow); a synthetic fixture gives single digits
+    MIN_TRUE = MIN_PRED = 150 if len(G) > 10_000 else 5
+    D["d1_dow"] = pd.DatetimeIndex(D.d1).dayofweek
+    Gp = G[(G.lab == "ordinary") & (G.lab_d1 == "ordinary")]
+    Dp = D[D.label == "ordinary"]
+    print(f"true grid (ordinary) {len(Gp):,} rows | v4 preds (ordinary) {len(Dp):,} rows")
 
 
-def mad_to(c, ys, cs):
-    # exact mean |y - c| for every c against sorted ys with prefix sums cs
-    c = np.asarray(c, dtype=float)
-    k = np.searchsorted(ys, c)
-    left = k * c - cs[k]
-    right = (cs[-1] - cs[k]) - (len(ys) - k) * c
-    return (left + right) / len(ys)
+    def mad_to(c, ys, cs):
+        # exact mean |y - c| for every c against sorted ys with prefix sums cs
+        c = np.asarray(c, dtype=float)
+        k = np.searchsorted(ys, c)
+        left = k * c - cs[k]
+        right = (cs[-1] - cs[k]) - (len(ys) - k) * c
+        return (left + right) / len(ys)
 
 
-line("Q1  true vs predicted quantiles per (horizon x D1-dow), ordinary rows")
-rows, grid_m = [], np.round(np.arange(0.40, 2.01, 0.02), 2)
-_i1 = int(np.where(grid_m == 1.0)[0][0])
-_drop = 0
-for (h, dw), gt in Gp.groupby(["off", "d1_dow"]):
-    pr = Dp[(Dp.h == h) & (Dp.d1_dow == dw)]
-    y = gt.ratio.to_numpy(dtype=float)
-    p = pr.ratio.to_numpy(dtype=float)
-    y, p = y[np.isfinite(y)], p[np.isfinite(p)]      # a NaN scale must not poison a whole cell
-    _drop += int((~np.isfinite(gt.ratio.to_numpy(dtype=float))).sum())
-    if len(y) < MIN_TRUE or len(p) < MIN_PRED:
-        continue
-    y = np.sort(y)
-    cs = np.concatenate([[0.0], np.cumsum(y)])
-    curve = np.array([mad_to(m * p, y, cs).mean() for m in grid_m])
-    assert np.isfinite(curve).all(), f"non-finite MAE curve at h={h} dow={dw}"
-    j = int(curve.argmin())
-    _tm, _pm = float(np.median(y)), float(np.median(p))
-    rows.append(dict(h=h, dow=_DOW[dw], n_true=len(y), n_pred=len(p),
-                     true_q25=np.quantile(y, .25), true_med=_tm,
-                     true_q75=np.quantile(y, .75),
-                     pred_q25=np.quantile(p, .25), pred_med=_pm,
-                     pred_q75=np.quantile(p, .75),
-                     med_mult=(_tm / _pm) if _pm > 0 else np.nan,
-                     med_agree=(abs(_tm - _pm) < 1e-9) or (_pm > 0 and abs(_tm / _pm - 1) < 0.10),
-                     best_m=grid_m[j], mae_at_1=curve[_i1], mae_best=curve[j]))
-Q = pd.DataFrame(rows)
-assert len(Q) > 0, "no (horizon x dow) cell had enough rows on both sides"
-if _drop:
-    print(f"note: dropped {_drop:,} non-finite true ratios before any statistic")
-Q["gain"] = Q.mae_at_1 - Q.mae_best
-print(Q[["h", "dow", "n_true", "n_pred", "true_q25", "true_med", "true_q75",
-         "pred_q25", "pred_med", "pred_q75"]].round(3).to_string(index=False))
+    line("Q1  true vs predicted quantiles per (horizon x D1-dow), ordinary rows")
+    rows, grid_m = [], np.round(np.arange(0.40, 2.01, 0.02), 2)
+    _i1 = int(np.where(grid_m == 1.0)[0][0])
+    _drop = 0
+    for (h, dw), gt in Gp.groupby(["off", "d1_dow"]):
+        pr = Dp[(Dp.h == h) & (Dp.d1_dow == dw)]
+        y = gt.ratio.to_numpy(dtype=float)
+        p = pr.ratio.to_numpy(dtype=float)
+        y, p = y[np.isfinite(y)], p[np.isfinite(p)]      # a NaN scale must not poison a whole cell
+        _drop += int((~np.isfinite(gt.ratio.to_numpy(dtype=float))).sum())
+        if len(y) < MIN_TRUE or len(p) < MIN_PRED:
+            continue
+        y = np.sort(y)
+        cs = np.concatenate([[0.0], np.cumsum(y)])
+        curve = np.array([mad_to(m * p, y, cs).mean() for m in grid_m])
+        assert np.isfinite(curve).all(), f"non-finite MAE curve at h={h} dow={dw}"
+        j = int(curve.argmin())
+        _tm, _pm = float(np.median(y)), float(np.median(p))
+        rows.append(dict(h=h, dow=_DOW[dw], n_true=len(y), n_pred=len(p),
+                         true_q25=np.quantile(y, .25), true_med=_tm,
+                         true_q75=np.quantile(y, .75),
+                         pred_q25=np.quantile(p, .25), pred_med=_pm,
+                         pred_q75=np.quantile(p, .75),
+                         med_mult=(_tm / _pm) if _pm > 0 else np.nan,
+                         med_agree=(abs(_tm - _pm) < 1e-9) or (_pm > 0 and abs(_tm / _pm - 1) < 0.10),
+                         best_m=grid_m[j], mae_at_1=curve[_i1], mae_best=curve[j]))
+    Q = pd.DataFrame(rows)
+    assert len(Q) > 0, "no (horizon x dow) cell had enough rows on both sides"
+    if _drop:
+        print(f"note: dropped {_drop:,} non-finite true ratios before any statistic")
+    Q["gain"] = Q.mae_at_1 - Q.mae_best
+    print(Q[["h", "dow", "n_true", "n_pred", "true_q25", "true_med", "true_q75",
+             "pred_q25", "pred_med", "pred_q75"]].round(3).to_string(index=False))
 
-line("Q2  MAE-optimal multiplier per cell  (med_mult = median-matching, best_m = MAE-optimal)")
-print(Q[["h", "dow", "n_pred", "med_mult", "best_m", "mae_at_1", "mae_best", "gain"]]
-      .round(4).to_string(index=False))
-print("\nbest_m pinned to a grid edge (0.40 / 2.00) means the optimum is outside the scan:",
-      sorted(set(Q.best_m[(Q.best_m <= 0.40) | (Q.best_m >= 2.00)])) or "none")
+    line("Q2  MAE-optimal multiplier per cell  (med_mult = median-matching, best_m = MAE-optimal)")
+    print(Q[["h", "dow", "n_pred", "med_mult", "best_m", "mae_at_1", "mae_best", "gain"]]
+          .round(4).to_string(index=False))
+    print("\nbest_m pinned to a grid edge (0.40 / 2.00) means the optimum is outside the scan:",
+          sorted(set(Q.best_m[(Q.best_m <= 0.40) | (Q.best_m >= 2.00)])) or "none")
 
-line("Q3  what this is worth over the whole submission, if it transfers")
-_wt = Q.n_pred / len(Dp)
-_ord_share = len(Dp) / len(D)
-_cell = float((Q.gain * _wt).sum())
-print(f"cells covered: {len(Q)} | {int(Q.n_pred.sum()):,} of {len(Dp):,} ordinary rows "
-      f"({Q.n_pred.sum() / len(Dp):.1%}) | ordinary = {_ord_share:.1%} of all test rows")
-print(f"weighted MAE gain on the covered ordinary rows : {_cell:.4f}")
-print(f"=> upper bound on total MASE gain              : {_cell * _ord_share * (Q.n_pred.sum() / len(Dp)):.4f}")
-print("\nThis is an UPPER bound and almost certainly optimistic: the scan assumes v4 has no")
-print("within-cell discrimination, and it is fitted on Apr-Sep films then applied to Oct-Mar.")
+    line("Q3  what this is worth over the whole submission, if it transfers")
+    _wt = Q.n_pred / len(Dp)
+    _ord_share = len(Dp) / len(D)
+    _cell = float((Q.gain * _wt).sum())
+    print(f"cells covered: {len(Q)} | {int(Q.n_pred.sum()):,} of {len(Dp):,} ordinary rows "
+          f"({Q.n_pred.sum() / len(Dp):.1%}) | ordinary = {_ord_share:.1%} of all test rows")
+    print(f"weighted MAE gain on the covered ordinary rows : {_cell:.4f}")
+    print(f"=> upper bound on total MASE gain              : {_cell * _ord_share * (Q.n_pred.sum() / len(Dp)):.4f}")
+    print("\nThis is an UPPER bound and almost certainly optimistic: the scan assumes v4 has no")
+    print("within-cell discrimination, and it is fitted on Apr-Sep films then applied to Oct-Mar.")
 
-line("Q4  the honest read on the median")
-print(f"cells where the predicted median already matches the true median: "
-      f"{int(Q.med_agree.sum())} of {len(Q)}")
-print("  (counts a both-zero median as agreement - at D9/D10 the true median IS 0)")
-_mm = Q[(Q.pred_med > 0) & (Q.true_med > 0)]
-if len(_mm):
-    print(f"across the {len(_mm)} cells with both medians non-zero, med_mult"
-          f" median {_mm.med_mult.median():.3f} | range {_mm.med_mult.min():.3f}"
-          f"-{_mm.med_mult.max():.3f}")
-print("if med_mult sits near 1.0, v4's LEVEL is right and the T4 mean gap was skew,")
-print("which closes level post-processing and leaves only the film-curve (oracle A) lever.")
-Q.to_pickle(CACHE_DIR / "horizon_level_check.pkl")
+    line("Q4  the honest read on the median")
+    print(f"cells where the predicted median already matches the true median: "
+          f"{int(Q.med_agree.sum())} of {len(Q)}")
+    print("  (counts a both-zero median as agreement - at D9/D10 the true median IS 0)")
+    _mm = Q[(Q.pred_med > 0) & (Q.true_med > 0)]
+    if len(_mm):
+        print(f"across the {len(_mm)} cells with both medians non-zero, med_mult"
+              f" median {_mm.med_mult.median():.3f} | range {_mm.med_mult.min():.3f}"
+              f"-{_mm.med_mult.max():.3f}")
+    print("if med_mult sits near 1.0, v4's LEVEL is right and the T4 mean gap was skew,")
+    print("which closes level post-processing and leaves only the film-curve (oracle A) lever.")
+    Q.to_pickle(CACHE_DIR / "horizon_level_check.pkl")
 print(f"\n[CELL 10] {time.time() - t0:.1f}s")
 """)
 
@@ -1137,75 +1154,24 @@ code(r"""
 # CELL 11 — REPRODUCE v4 OOF, THEN TEST THE CLIPPED H_GRID (heavy, resumable)
 t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
-import importlib.util, json as _json
+import json as _json
+import v5_pipeline as P          # shared setup; keeps every heavy cell independently runnable
 
-# ---- v4's final() was invoked as: final(featset, w_open, paramset) -----------
-# the v4 docstring says "competition features", "127 leaves / min 100", "extra weight on
-# opening-week windows", so this is the best reconstruction. Change if you learn the real args.
-V4_FS, V4_WOPEN, V4_PS = "H", 2.0, "P2"
 FOLD_KINDS = ("group", "time")
 
 if not RUN_HEAVY:
-    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1 and re-run this cell.")
-    print("Expect roughly 10-40 min per fold scheme on 16 cores.")
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    _v3p = Path("cinema_forecasting_v3.py")
-    _v4p = Path("0.43715.py")
-    assert _v3p.exists(), "put cinema_forecasting_v3.py next to this notebook"
-    assert _v4p.exists(), "put 0.43715.py next to this notebook"
-
-    def _load(path, name):
-        sp = importlib.util.spec_from_file_location(name, path)
-        m = importlib.util.module_from_spec(sp)
-        sys.modules[name] = m
-        sp.loader.exec_module(m)          # both files guard real work behind __main__
-        return m
-
-    v3 = _load(_v3p, "cinema_forecasting_v3")
-    v4 = _load(_v4p, "v4_script")
-
-    # v3.load_data() hard-codes DATA = 'data/' and expects the canonical six names, but the
-    # real file here is "train (1).csv" and there is no data/ directory. Stage correctly
-    # named copies and repoint v3 at them, rather than renaming anything in place.
-    _stage = CACHE_DIR / "v3data"
-    _stage.mkdir(exist_ok=True)
-    import shutil
-    for _s in ("train", "test_history", "test", "movies", "holidays", "ticket_prices"):
-        _dst = _stage / f"{_s}.csv"
-        _src = find_file(_s)                      # from CELL 1: tolerates the " (1)" suffix
-        if not _dst.exists() or _dst.stat().st_mtime < _src.stat().st_mtime:
-            shutil.copyfile(_src, _dst)
-        print(f"  staged {_s + '.csv':20s} <- {_src.name:24s} {_dst.stat().st_size / 1e6:7.2f} MB")
-    v3.DATA = str(_stage) + os.sep
-    v4.v3.DATA = v3.DATA                          # v4 calls v3.load_data() through its own ref
-    print(f"v3.DATA -> {v3.DATA}")
-
-    print(f"v3 + v4 imported | featset {V4_FS} ({len(v4.FEATSETS[V4_FS])} feats) | "
-          f"w_open {V4_WOPEN} | paramset {V4_PS}")
+    # v5_pipeline handles the three things that are easy to get wrong:
+    #   * v3.load_data() hard-codes DATA='data/' and canonical names ("train (1).csv" here)
+    #   * v3.encode_cats() must see the train AND test frames in ONE call or codes misalign
+    #   * featsets F/G/H need v4.load_table(), not v3.prepare()
+    v3, v4 = P.load_modules(".")
+    data, test = P.get_tables(v3, v4)
+    print(f"\nfeatset {V4_FS} ({len(v4.FEATSETS[V4_FS])} feats) | w_open {V4_WOPEN} "
+          f"| paramset {V4_PS}")
     print(f"v4 H_GRID: {v4.H_GRID.min():.2f} .. {v4.H_GRID.max():.3f}   <-- floor under test")
-
-    # ------------------------------------------------- 1. window table (cached)
-    # NOTE: use v4.load_table(), not v3.prepare(). Featsets F/G/H need v4's own
-    # competition (comp_nat, comp_nat_rel, comp_cl, comp_cl_rel) and cluster-weekday
-    # (cl_dow_t, cl_dow_h, cl_dow_r) columns, which v3.prepare() does not add.
-    _tab = CACHE_DIR / "v4_window_table.pkl"
-    if _tab.exists():
-        data = pd.read_pickle(_tab)
-        print(f"window table loaded from cache: {data.shape}")
-    else:
-        print("building window table via v4.load_table() ...", flush=True)
-        data, _ctx = v4.load_table()
-        data.to_pickle(_tab)
-        print(f"window table built and cached: {data.shape}")
-    _need = [c for c in v4.FEATSETS[V4_FS] if c not in data.columns]
-    assert not _need, (f"cached table predates the featset - delete {_tab} and re-run. "
-                       f"missing: {_need}")
-    # LightGBM rejects str/object columns; under pandas 3 these stay `str` unless encoded.
-    if str(data[v3.CAT_COLS[0]].dtype) != "category":
-        v3.encode_cats([data])
-        data.to_pickle(_tab)
-    print("categoricals:", {c: str(data[c].dtype) for c in v3.CAT_COLS})
-    _vp = (data.window == 0) & ~data.bad
+    _vp = P.release_mask(data)
     print(f"rows {len(data):,} | clean release (offset 0) rows {int(_vp.sum()):,} "
           f"| opening-offset rows {int(data.window.isin(v3.OPEN_OFFSETS).sum()):,}")
 
@@ -1312,12 +1278,12 @@ t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 
 if not RUN_HEAVY:
-    print("RUN_HEAVY is False -> skipping. Needs CELL 11's cached window table.")
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
     import lightgbm as lgb
-    v3 = sys.modules["cinema_forecasting_v3"]
-    v4 = sys.modules["v4_script"]
-    data = pd.read_pickle(CACHE_DIR / "v4_window_table.pkl")
+    import v5_pipeline as P
+    v3, v4 = P.load_modules(".", verbose=False)
+    data, test = P.get_tables(v3, v4, verbose=False)
     vp = (data.window == 0) & ~data.bad
     pool = data[vp]
     BASE_FEATS = v4.FEATSETS[V4_FS]
@@ -1421,11 +1387,11 @@ line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 import itertools
 
 if not RUN_HEAVY:
-    print("RUN_HEAVY is False -> skipping. Needs cache/v4_window_table.pkl from CELL 11.")
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    v3 = sys.modules["cinema_forecasting_v3"]
-    v4 = sys.modules["v4_script"]
-    data = pd.read_pickle(CACHE_DIR / "v4_window_table.pkl")
+    import v5_pipeline as P
+    v3, v4 = P.load_modules(".", verbose=False)
+    data, test = P.get_tables(v3, v4, verbose=False)
     vp = (data.window == 0) & ~data.bad
     pool, s = data[vp], data[vp]
     yy = s.y.to_numpy()
@@ -1540,104 +1506,112 @@ code(r"""
 # CELL 14 — WEIGHTED METRIC + submission_v5a.csv
 t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
-SCALE_EDGES = [0, 2, 5, 10, 25, 50, 100, 250, 1e9]
-SB_LAB = ["<=2", "2-5", "5-10", "10-25", "25-50", "50-100", "100-250", ">250"]
 
 if not RUN_HEAVY:
-    print("RUN_HEAVY is False -> skipping. Needs CELL 11's cached window table.")
+    print("RUN_HEAVY is False -> skipping. Set RUN_HEAVY = True in CELL 1.")
 else:
-    v3 = sys.modules["cinema_forecasting_v3"]
-    v4 = sys.modules["v4_script"]
-    data = pd.read_pickle(CACHE_DIR / "v4_window_table.pkl")
-    test = pd.read_pickle(CACHE_DIR / "v4_test_table.pkl")
-    vp = (data.window == 0) & ~data.bad
+    import v5_pipeline as P
+    v3, v4 = P.load_modules(".", verbose=False)
+    data, test = P.get_tables(v3, v4, verbose=False)
+    vp = P.release_mask(data)
 
     line("W1  the gap is scale composition - build the weighted metric")
-    _sb = pd.cut(data.scale, SCALE_EDGES, labels=False).fillna(7).astype(int)
-    _sbt = pd.cut(test.scale, SCALE_EDGES, labels=False).fillna(7).astype(int)
-    te_sh = _sbt.value_counts(normalize=True).reindex(range(8)).fillna(0)
-    va_sh = _sb[vp].value_counts(normalize=True).reindex(range(8)).fillna(0)
-    w_eval = (te_sh / va_sh.replace(0, np.nan)).fillna(1.0).to_numpy()
-    EW = w_eval[_sb.to_numpy()]
-    print(pd.DataFrame({"bin": SB_LAB, "valid_share": va_sh.to_numpy(),
-                        "test_share": te_sh.to_numpy(), "weight": w_eval}).round(4).to_string(index=False))
-
-    def wmase(oof):
-        # (plain MASE, test-mix-weighted MASE) -- ALWAYS select on the second one
-        s = data.loc[oof.index]
-        e = np.abs(s.y - oof.clip(lower=0))
-        w = EW[data.index.get_indexer(oof.index)]
-        return float(e.mean()), float((e * w).sum() / w.sum())
-
-    for kind in ("group", "time"):
+    w_eval, EW, sb = P.scale_weights(data, test)
+    wmase = P.make_wmase(data, EW)
+    for kind in FOLD_KINDS:
         _p = CACHE_DIR / f"oof_{V4_FS}_{V4_WOPEN}_{V4_PS}_{kind}.pkl"
         if _p.exists():
             a, b = wmase(pd.read_pickle(_p))
             print(f"  [{kind}] v4 pooled CV {a:.4f} -> REWEIGHTED {b:.4f}   (actual LB 0.43715)")
+    print("\n  ALWAYS select on the weighted number. Selecting on plain CV is what made six")
+    print("  rounds of apparent gains fail to transfer to the leaderboard.")
 
-    line("W2  train the two surviving changes on all data and write submission_v5a.csv")
-    FS = "F"
-    feats = v4.FEATSETS[FS]
-    folds = {k: v3.make_folds(data[vp], k) for k in ("group", "time")}
-    OO = {}
-    for nm, (pp, kd) in {"A": (v4.PARAMSETS[V4_PS], "reg"), "B": (v4.PARAMS_B, "reg"),
-                         "p0": (v4.PARAMSETS[V4_PS], "clf")}.items():
-        parts = []
-        for kind in ("group", "time"):
+    line(f"W2  OOF for featset {V5_FS} on both schemes (cached)")
+    feats = v4.FEATSETS[V5_FS]
+    folds = {k: v3.make_folds(data[vp], k) for k in FOLD_KINDS}
+    SPEC = {"A": (v4.PARAMSETS[V4_PS], "reg", 5), "B": (v4.PARAMS_B, "reg", 3),
+            "p0": (v4.PARAMSETS[V4_PS], "clf", 3)}
+    OO, ITERS = {}, {}
+    for nm, (pp, kd, _) in SPEC.items():
+        OO[nm], it = {}, []
+        for kind in FOLD_KINDS:
             _c = CACHE_DIR / f"oofF_{nm}_{kind}.pkl"
-            if _c.exists():
-                o = pd.read_pickle(_c)
+            _ci = OUT_DIR / f"iters_{nm}_{kind}.json"
+            if _c.exists() and _ci.exists():
+                OO[nm][kind] = pd.read_pickle(_c)
+                it += _json.loads(_ci.read_text())
             else:
-                o, _ = v4.run_cv(data, feats, folds[kind], pp, w_open=V4_WOPEN, kind=kd)
+                _t = time.time()
+                o, i = v4.run_cv(data, feats, folds[kind], pp, w_open=V4_WOPEN, kind=kd)
+                OO[nm][kind] = o
                 pd.to_pickle(o, _c)
-                print(f"  trained {nm} [{kind}]", flush=True)
-            parts.append(o)
-        OO[nm] = parts
-    # fit post-processing on both schemes pooled, minimising the WEIGHTED objective
-    frames = []
-    for i, kind in enumerate(("group", "time")):
-        idx = OO["A"][i].index
-        frames.append(pd.DataFrame({"y": data.y.loc[idx], "A": OO["A"][i].clip(lower=0),
-                                    "B": OO["B"][i].clip(lower=0), "p0": OO["p0"][i].loc[idx],
-                                    "h": data.h.loc[idx], "sb": _sb.loc[idx]}))
-    fr = pd.concat(frames)
-    fr["w"] = w_eval[fr.sb.to_numpy()]
-    y, ww = fr.y.to_numpy(), fr.w.to_numpy()
-    bf = lambda g, er: g[int(np.argmin([er(x) for x in g]))]
-    a_, b_ = fr.A.to_numpy(), fr.B.to_numpy()
-    w0 = bf(v4.W_GRID, lambda w: (ww * np.abs(y - w * a_ - (1 - w) * b_)).sum())
-    r = w0 * a_ + (1 - w0) * b_
-    bn = v4.zero_bin(fr.p0.to_numpy())
-    zm = np.ones(10)
-    for k in range(10):
-        m_ = bn == k
-        if m_.sum() >= 200:
-            zm[k] = bf(v4.ZERO_GRID, lambda m: (ww[m_] * np.abs(y[m_] - m * r[m_])).sum())
-    r = r * zm[bn]
-    hm = {}
-    for k in v3.HORIZONS:
-        m_ = fr.h.to_numpy() == k
-        if m_.sum():
-            hm[k] = bf(v4.H_GRID, lambda m: (ww[m_] * np.abs(y[m_] - m * r[m_])).sum())
-    print(f"  blend weight A={w0:.2f} | zero multipliers {np.round(zm, 2).tolist()}")
-    print(f"  horizon multipliers {hm}")
+                _ci.write_text(_json.dumps(i))
+                it += i
+                print(f"  trained {nm} [{kind}] in {time.time() - _t:.0f}s", flush=True)
+        ITERS[nm] = max(50, int(np.mean(it)))
+    for kind in FOLD_KINDS:
+        a, b = wmase(OO["A"][kind])
+        print(f"  [{kind}] featset {V5_FS} raw model A: plain {a:.4f} | WEIGHTED {b:.4f}")
+    print(f"  mean best_iteration per model: {ITERS}")
 
-    # round counts: v4 trains the final models for the mean best_iteration seen in CV.
-    # Measured here: ~255 (time) and ~273 (group) for A. 1.3x gives the usual full-data margin.
-    N_A, N_B, N_P = 350, 350, 300
-    mA = v4.train_full(data, feats, v4.PARAMSETS[V4_PS], N_A,
-                       [SEED + i for i in range(5)], V4_WOPEN)
-    mB = v4.train_full(data, feats, v4.PARAMS_B, N_B,
-                       [SEED + 100 + i for i in range(3)], V4_WOPEN)
-    mP = v4.train_full(data, feats, v4.PARAMSETS[V4_PS], N_P,
-                       [SEED + 200 + i for i in range(3)], V4_WOPEN, 'clf')
-    tf = pd.DataFrame({"A": np.clip(mA, 0, None), "B": np.clip(mB, 0, None), "p0": mP,
-                       "h": test.h.to_numpy()})
-    rt = w0 * tf.A.to_numpy() + (1 - w0) * tf.B.to_numpy()
-    rt = rt * zm[v4.zero_bin(tf.p0.to_numpy())]
-    rt = rt * pd.Series(tf.h.to_numpy()).map(hm).fillna(1.0).to_numpy()
-    v4.write_sub("submission_v5a.csv", test, rt, test.scale.to_numpy())
-    print("\n  submission_v5a.csv written. Expect roughly 0.437 -> 0.433.")
+    line("W3  fit post-processing on the WEIGHTED objective, cross-fitted to verify")
+    frames = {}
+    for kind in FOLD_KINDS:
+        idx = OO["A"][kind].index
+        fr = pd.DataFrame({"y": data.y.loc[idx], "A": OO["A"][kind].clip(lower=0),
+                           "B": OO["B"][kind].clip(lower=0), "p0": OO["p0"][kind].loc[idx],
+                           "h": data.h.loc[idx], "sb": sb.loc[idx],
+                           "mv": data.movie_title.loc[idx]})
+        fr["w"] = w_eval[fr.sb.to_numpy()]
+        frames[kind] = fr
+    for kind in FOLD_KINDS:
+        fr = frames[kind]
+        raw = float((fr.w * np.abs(fr.y - fr.A)).sum() / fr.w.sum())
+        print(f"  [{kind}] raw A                        WEIGHTED {raw:.4f}")
+        for wt, lab in ((False, "post fit on PLAIN (v4 as-is)"), (True, "post fit on WEIGHTED")):
+            num = den = pn = 0.0
+            for vm, _ in folds[kind]:
+                m = fr.mv.isin(vm)
+                va, tr = fr[m], fr[~m]
+                if not len(va) or not len(tr):
+                    continue
+                r = P.apply_post(va, P.fit_post_weighted(tr, v3, v4, wt), v4)
+                e = np.abs(va.y.to_numpy() - r)
+                num += (va.w.to_numpy() * e).sum()
+                den += va.w.to_numpy().sum()
+                pn += e.sum()
+            print(f"  [{kind}] {lab:28s} plain {pn / len(fr):.4f} | WEIGHTED {num / den:.4f}")
+    # ship the version fitted on both schemes pooled, weighted objective
+    post = P.fit_post_weighted(pd.concat(frames.values()), v3, v4, weighted=True)
+    print(f"\n  shipped post: blend A weight {post['w']:.2f}")
+    print(f"    zero multipliers per p0 decile {np.round(post['zm'], 2).tolist()}")
+    print(f"    horizon multipliers {post['hm']}")
+
+    line("W4  train on all clean windows and write submission_v5a.csv")
+    preds = {}
+    for nm, (pp, kd, nseed) in SPEC.items():
+        seeds = [SEED + {"A": 0, "B": 100, "p0": 200}[nm] + i for i in range(nseed)]
+        boosters = v4.train_full(data, feats, pp, ITERS[nm], seeds, V4_WOPEN, kd)
+        preds[nm] = np.mean([m.predict(test[feats]) for m in boosters], axis=0)
+        print(f"  {nm}: {len(boosters)} seeds x {ITERS[nm]} rounds", flush=True)
+    tf = pd.DataFrame({"A": np.clip(preds["A"], 0, None), "B": np.clip(preds["B"], 0, None),
+                       "p0": preds["p0"], "h": test.h.to_numpy()})
+    ratio = np.clip(P.apply_post(tf, post, v4), 0, None)
+    # v4's final() rule: a pair with no D1-D3 tickets cannot sell any
+    _hist = (test.t1.fillna(0) + test.t2.fillna(0) + test.t3.fillna(0)).to_numpy()
+    ratio[_hist == 0] = 0
+    print(f"  rows forced to zero by the no-history rule: {int((_hist == 0).sum()):,}")
+    v4.write_sub("submission_v5a.csv", test, ratio, test.scale.to_numpy())
+    _old = Path("submission_v4.csv")
+    if _old.exists():
+        _o = pd.read_csv(_old)
+        _n = pd.read_csv("submission_v5a.csv")
+        _d = (_o.total_ticket.to_numpy() != _n.total_ticket.to_numpy())
+        print(f"  rows differing from submission_v4.csv: {int(_d.sum()):,} ({_d.mean():.1%})"
+              f" | total tickets {_o.total_ticket.sum():,} -> {_n.total_ticket.sum():,}")
+    print("\n  SUBMIT submission_v5a.csv. Expected: 0.43715 -> about 0.433.")
+    print("  The two changes are featset F instead of H, and post-processing fitted on the")
+    print("  test-mix-weighted objective. Both passed the group AND time schemes.")
 print(f"\n[CELL 14] {time.time() - t0:.1f}s")
 """)
 
