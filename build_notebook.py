@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 17
+NB_VERSION = 18
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -3524,9 +3524,12 @@ code(r"""
 t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 
-LEB_MULTS = [1.15]            # 1.2 scored 0.42057; the two-point solve puts the
-                              # optimum at k ~ 1.149, so 1.15 is the remaining probe
+LEB_MULTS = [1.4, 1.6]        # see LB_HISTORY below: the arm is still linear at 1.2
 RAM_MULTS = [1.0]             # 1.0 = leave Ramadan alone; 0.85 damps it
+
+# Measured leaderboard scores for the flat Lebaran multiplier. Add every new result
+# here; P3 fits the left arm and extrapolates, which beats reasoning about it by hand.
+LB_HISTORY = {1.0: 0.42677, 1.15: 0.42213, 1.2: 0.42057}
 
 _preds = sorted(Path(".").glob("v5_test_pred_*.csv"))
 if not _preds:
@@ -3572,17 +3575,37 @@ else:
             print(f"    rows changed {int(_chg.sum()):,} ({_chg.mean():.2%}) | "
                   f"tickets {_base.sum():,} -> {v.sum():,}")
 
-    line("P3  how to read the result")
-    print("  Submit ONE variant and compare against the unmodified file's score.")
-    print("  The Lebaran rows are 6.08% of the test set, so with a 30% public split about")
-    print("  1,300 of them are scored - enough to move the number measurably.")
+    line("P3  fit the left arm of the V and extrapolate")
+    _ks = sorted(LB_HISTORY)
+    print("  measured so far:")
+    _sl = []
+    for a, b in zip(_ks, _ks[1:]):
+        sl = (LB_HISTORY[a] - LB_HISTORY[b]) / (b - a)
+        _sl.append(sl)
+        print(f"    m {a:.2f} -> {LB_HISTORY[a]:.5f}   m {b:.2f} -> {LB_HISTORY[b]:.5f}"
+              f"   slope {sl:+.5f} per unit m")
+    if len(_sl) >= 2:
+        _spread = max(_sl) - min(_sl)
+        print(f"\n  slopes agree to {_spread:.5f}"
+              f" -> {'LINEAR, so the optimum k is still above the largest m tried'
+                    if _spread < 0.005 else 'NOT linear, the turn is near the largest m tried'}")
+    _last = _ks[-1]
+    _use = _sl[-1]
+    print(f"\n  extrapolating from m = {_last:.2f} at slope {_use:.5f}:")
+    for m in LEB_MULTS:
+        if m > _last:
+            print(f"    m {m:.2f} -> {LB_HISTORY[_last] - _use * (m - _last):.5f}"
+                  f"   (holds only while k >= {m:.2f})")
+    print("\n  Under S(m) = C + |k - m| x W the left arm is straight and the right arm rises")
+    print("  at the same slope, so overshooting k by d costs the same as undershooting by d.")
+    print("  Submit the SMALLER multiplier first and keep going while the score falls; the")
+    print("  first value that scores worse than its predecessor brackets the optimum.")
     print()
-    print("  If leb1.2 IMPROVES the score: the model under-predicts Eid week. Try 1.4, and")
-    print("    the direction is confirmed for the private split too.")
-    print("  If leb1.2 WORSENS it: the model was already right, stop. Do not try 1.4.")
+    print("  Record each result in LB_HISTORY above and re-run this cell to refit.")
     print()
-    print("  Spend the 1.2 probe first. It is the smaller bet and it answers the same")
-    print("  question as 1.4, which only doubles the stake.")
+    print("  Independent support for a large k: FINDINGS.md measured train's Eid-window rows")
+    print(f"  at a median y/scale of 1.880 against this cohort's predicted mean of"
+          f" {float(p.loc[p.leb == 1, 'ratio'].mean()):.3f}, implying k ~ 1.8.")
 print(f"\n[CELL 25] {time.time() - t0:.1f}s")
 """)
 
@@ -4109,8 +4132,17 @@ independent discoveries. That is the next thing to investigate, not another feat
 | `submission_v5a.csv` (v4 table + weighted post-fit) | 0.43072 | |
 | `submission_v5c.csv` (v5 table + post-processing, ff 0.7) | 0.42677 | |
 | ff 0.5 variant | 0.42825 | worse -- see below |
-| **`probe_leb1.2`** | **0.42057** | **best** |
-| `leb_early1.15` (shape tilted to D4/D5) | 0.42840 | worse |
+| `probe_leb1.15` | 0.42213 | |
+| **`probe_leb1.2`** | **0.42057** | **best so far** |
+| `leb_early1.15` (shape tilted to D4/D5) | 0.42840 | worse -- shape is not the issue |
+
+**The Lebaran level is not yet bracketed.** Three flat readings -- 1.0 at 0.42677, 1.15 at
+0.42213, 1.2 at 0.42057 -- lie on a straight line with slope 0.0309 then 0.0312 per unit m.
+A constant negative slope means the whole range is on the **left arm** of the V, so the optimum
+`k` is **above 1.2** and the search should continue upward. Extrapolating at 0.0312 gives 1.4 ->
+~0.4143, 1.6 -> ~0.4081, 1.8 -> ~0.4019, which holds only while `k` exceeds the multiplier tried.
+`FINDINGS.md`'s train-side Eid median of 1.880 against this cohort's predicted mean of 1.043
+independently implies `k ~ 1.8`.
 
 **0.43715 -> 0.42057, a 3.8% relative improvement.** Two things did essentially all of it, and
 both are **calendar corrections that no offline experiment could validate**:
