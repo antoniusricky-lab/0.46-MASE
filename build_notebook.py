@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 15
+NB_VERSION = 16
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -3583,6 +3583,136 @@ else:
     print("  Spend the 1.2 probe first. It is the smaller bet and it answers the same")
     print("  question as 1.4, which only doubles the stake.")
 print(f"\n[CELL 25] {time.time() - t0:.1f}s")
+""")
+
+md(r"""
+## CELL 26 — the Lebaran shape, now that the level is measured
+
+`submission_probe_leb1.2` scored **0.42057** against 0.42677, a gain of **-0.0062** on 5.54% of
+rows. So the model does under-predict Idulfitri week, and the level can now be solved for rather
+than guessed.
+
+Changed rows have a mean predicted ratio of ~1.146 (the 8.92% that are zero cannot move), so the
+per-row gain is `0.0062 / 0.0554 = 0.112`. Under a uniform `truth = k x prediction` model the gain
+at multiplier `m` is `[(k-1) - |k-m|] x r_pred`, and solving at `m = 1.2` gives **k ~ 1.15**. The
+flat optimum is therefore just below the probe already spent, and **1.4 would score about 0.4333**
+— worse than the starting point. Do not raise the flat multiplier.
+
+What is wrong is the **shape**, and not in the direction I first assumed. Chaining the two
+measurements we have — the Wednesday normal-decay curve (CELL 9 T3, the cohort opens Wed
+2026-03-18) and the Eid market ratio (CELL 8 M4) — gives an implied target:
+
+| | D4 | D5 | D6 | D7 | D8 | D9 | D10 |
+|---|----|----|----|----|----|----|-----|
+| Wed normal decay | 1.499 | 1.356 | 0.750 | 0.639 | 0.441 | 0.473 | 0.387 |
+| market ratio | 2.407 | 2.407 | 1.975 | 2.398 | 2.271 | 1.756 | 1.519 |
+| **implied target** | **3.61** | **3.26** | 1.48 | 1.53 | 1.00 | 0.83 | 0.59 |
+| model | 1.435 | 1.283 | 1.339 | 1.149 | 0.980 | 0.562 | 0.556 |
+| needed multiplier | **2.52** | **2.54** | 1.11 | 1.33 | 1.02 | 1.48 | 1.06 |
+
+The model declines 2.58x across the week; the implied truth declines **6.14x**. So its decay is
+too **shallow**, and the correction needed is **largest at D4/D5** — the Eid weekend — not at the
+back end. My first reading of this was backwards.
+
+The chained estimate's *level* is wrong too: its ticket-weighted mean multiplier is 1.68 against
+the 1.15 the probe actually solved for, so it overshoots by ~1.5x. Renormalising each shape to
+level 1.15 **keeps the shape and discards the level**, which is the only part of it we have
+independent evidence for.
+
+So these variants **hold the level** at the measured optimum and change only the shape, which
+makes them a test of one thing rather than two. Each multiplier vector is renormalised so the
+ticket-weighted mean equals the target level, meaning the total tickets added matches the probe
+that already worked.
+""")
+code(r"""
+# CELL 26 — LEBARAN SHAPE VARIANTS (level held at the measured optimum)
+t0 = time.time()
+line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
+
+LEVEL = 1.15          # solved from the 1.2 probe; see the markdown above
+# Relative shapes, renormalised below so the ticket-weighted mean multiplier equals LEVEL.
+# All three therefore add the SAME number of tickets and differ only in how they
+# distribute them across horizons, which makes the comparison a test of one thing.
+SHAPES = {
+    # the measured market factor on its own: mildly decreasing
+    "market":  {4: 2.407, 5: 2.407, 6: 1.975, 7: 2.398, 8: 2.271, 9: 1.756, 10: 1.519},
+    # smooth exponential matching the 2.4x span the chained estimate implies across the week
+    "early":   {h: float(np.exp(-0.146 * (h - 4))) for h in range(4, 11)},
+    # the raw chained estimate: most aggressive on D4/D5, and noisy because the Wednesday
+    # normal-decay curve behind it rests on ~1,630 rows per horizon
+    "implied": {4: 2.515, 5: 2.544, 6: 1.106, 7: 1.334, 8: 1.022, 9: 1.478, 10: 1.057},
+}
+
+_preds = sorted(Path(".").glob("v5_test_pred_*.csv"))
+if not _preds:
+    print("no v5_test_pred_*.csv found -> run CELL 20 first")
+else:
+    _src = _preds[-1]
+    if len(_preds) > 1:
+        print("several prediction files; using the newest:")
+        for f in _preds:
+            print(f"    {f.name}{'   <- using' if f == _src else ''}")
+    p = pd.read_csv(_src)
+    _tag = _src.stem.replace("v5_test_pred_", "")
+    leb = p.leb.to_numpy() == 1
+    print(f"  source {_src.name} | Lebaran rows {int(leb.sum()):,} ({leb.mean():.2%})")
+
+    line("H1  the model's Eid-week profile against the measured market factor")
+    _mk = SHAPES["market"]
+    _rows = []
+    for h in sorted(p.loc[leb, "h"].unique()):
+        m = leb & (p.h.to_numpy() == h)
+        _rows.append(dict(h=int(h), rows=int(m.sum()),
+                          model_ratio=round(float(p.ratio.to_numpy()[m].mean()), 4),
+                          market_factor=_mk.get(int(h)),
+                          zeros=f"{float((p.ratio.to_numpy()[m] == 0).mean()):.1%}"))
+    print(pd.DataFrame(_rows).to_string(index=False))
+    _mod = np.array([float(p.ratio.to_numpy()[leb & (p.h.to_numpy() == h)].mean())
+                     for h in range(4, 11)])
+    print(f"\n  model declines D4->D10 by {_mod[0] / _mod[-1]:.2f}x; the implied truth"
+          f" (Wed decay x market ratio) declines 6.14x")
+    print("  => the decay is too SHALLOW and the correction needed is largest at D4/D5.")
+
+    line("H2  write the shape variants, each renormalised to the same level")
+    _tick = np.clip(p.ratio.to_numpy(), 0, None) * p.scale.to_numpy()
+    base_tick = np.floor(_tick + 0.5).astype(int)
+    for nm, shape in SHAPES.items():
+        raw = np.array([shape.get(int(h), 1.0) for h in p.h.to_numpy()], dtype=float)
+        # renormalise over Lebaran rows so the ticket-weighted mean multiplier == LEVEL
+        wsum = _tick[leb].sum()
+        if wsum <= 0:
+            print(f"  {nm}: no Lebaran tickets to scale, skipped")
+            continue
+        cur = float((raw[leb] * _tick[leb]).sum() / wsum)
+        mult = np.where(leb, raw * (LEVEL / cur), 1.0)
+        r = p.ratio.to_numpy() * mult
+        v = np.floor(np.clip(r, 0, None) * p.scale.to_numpy() + 0.5).astype(int)
+        fn = f"submission_leb_{nm}{LEVEL}_{_tag}.csv"
+        pd.DataFrame({"id": p.id, "total_ticket": v}).to_csv(fn, index=False)
+        _eff = {int(h): round(float(mult[leb & (p.h.to_numpy() == h)][0]), 3)
+                for h in sorted(p.loc[leb, "h"].unique())}
+        print(f"  {fn}")
+        print(f"    per-horizon multiplier {_eff}")
+        print(f"    rows changed {int((v != base_tick).sum()):,} | tickets "
+              f"{base_tick.sum():,} -> {v.sum():,} "
+              f"(+{100 * (v.sum() / base_tick.sum() - 1):.2f}%)")
+
+    line("H3  which to submit")
+    print("  All three add the SAME number of tickets, so they differ only in shape.")
+    print("  That makes the comparison a clean test of one thing.")
+    print()
+    print("  Submit 'early' first. It carries the measured direction - more weight on the")
+    print("  Eid weekend, less on the back end - as a smooth curve, so it is not exposed to")
+    print("  the noise in the chained estimate the way 'implied' is.")
+    print()
+    print("  If 'early' beats 0.42057: the shape was wrong and 'implied' is the follow-up,")
+    print("    being the same direction but more aggressive.")
+    print("  If 'early' loses: the flat 1.2 already captured what is available, the cohort's")
+    print("    remaining error is not a horizon-shape effect, and 0.42057 stands. Stop.")
+    print()
+    print("  'market' is the mildest of the three and the least likely to be decisive either")
+    print("  way; skip it unless you have submissions to spare.")
+print(f"\n[CELL 26] {time.time() - t0:.1f}s")
 """)
 
 # =================================================================== decision log
