@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 20
+NB_VERSION = 22
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -3524,10 +3524,23 @@ code(r"""
 t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 
-LEB_MULTS = [2.0, 2.2]        # 2.0 scored 0.40532 and the slope is still negative; see P3
-RAM_MULTS = [1.0, 0.85]       # Ramadan straddle rows have NEVER been probed. Industry
-                              # reports put Ramadan attendance 30-40% below normal, and the
-                              # (2.0, 1.0) file below is the known 0.40532 reference.
+# Named variants (leb, ram, sch). The baseline (2.0, 1.0, 1.0) is the known 0.40532 file,
+# so every variant below is a clean single-variable test against it.
+#
+# Multipliers are now informed by external/cinepoint/cinepoint_daily_top_prev.csv -- two
+# complete pre-cutoff Oct-Mar seasons, the calendar window train.csv cannot contain. Its
+# day-of-week-adjusted national factors (baseline ordinary Oct-Nov 2024):
+#   Dec 20 - Jan 4 school break 1.335 | Jan 5 - Feb 14 ordinary 0.828
+#   Ramadan wk1-4 0.415 / 0.358 / 0.331 / 0.609   -> Ramadan is ~0.45x ordinary
+#   Eid+0..+8 2.29 3.39 3.85 3.12 2.62 2.19 2.42 5.26 4.96
+#   late-Ramadan -> Eid-week ratio 6.23x
+VARIANTS = [
+    ("ram0.5",        2.0, 0.50, 1.0),   # <<< the one to submit first: see P4
+    ("leb2.2",        2.2, 1.00, 1.0),
+    ("sch1.3",        2.0, 1.00, 1.3),
+    ("ram0.5_sch1.3", 2.0, 0.50, 1.3),
+]
+SCH_WINDOW = ("2025-12-20", "2026-01-04")   # the year-end school break in the test period
 
 # Measured leaderboard scores for the flat Lebaran multiplier. Add every new result
 # here; P3 fits the left arm and extrapolates, which beats reasoning about it by hand.
@@ -3547,6 +3560,10 @@ else:
         print(f"  using {_src.name}")
     p = pd.read_csv(_src)
     _tag = _src.stem.replace("v5_test_pred_", "")
+    # Define the Lebaran mask from the file, NOT from a leftover global. CELL 26 also binds
+    # a name `leb`; relying on that made this cell depend on run order and NameError on a
+    # fresh kernel, and a stale array would be silently misaligned with `p`.
+    leb = p.leb.to_numpy() == 1
     print(f"  source {_src.name} | rows {len(p):,}")
     print(f"  Lebaran-week rows {int(p.leb.sum()):,} ({p.leb.mean():.2%}) | "
           f"Ramadan-transition rows {int((p.ram_exp > 0).sum()):,}")
@@ -3564,19 +3581,39 @@ else:
     else:
         print("  no Lebaran rows flagged - check the date logic before probing")
 
-    line("P2  write the probe variants")
-    for lm in LEB_MULTS:
-        for rm in RAM_MULTS:
-            r = p.ratio.to_numpy() * np.where(p.leb == 1, lm, 1.0) * rm ** p.ram_exp.to_numpy()
-            nm = f"submission_probe_leb{lm}_ram{rm}_{_tag}.csv"
-            v = np.floor(np.clip(r, 0, None) * p.scale.to_numpy() + 0.5).astype(int)
-            pd.DataFrame({"id": p.id, "total_ticket": v}).to_csv(nm, index=False)
-            _base = np.floor(np.clip(p.ratio.to_numpy(), 0, None)
-                             * p.scale.to_numpy() + 0.5).astype(int)
-            _chg = (v != _base)
-            print(f"  {nm}")
-            print(f"    rows changed {int(_chg.sum()):,} ({_chg.mean():.2%}) | "
-                  f"tickets {_base.sum():,} -> {v.sum():,}")
+    line("P2  build the school-break mask and write the named variants")
+    # v5_test_pred carries leb and ram_exp but no school-break mask, and no date column.
+    # Recover dates by joining test.csv on id, so no CELL 20 re-run is needed.
+    _te = pd.read_csv(find_file("test"), parse_dates=["date_show"])
+    _d1 = (_te.groupby("movie_title").date_show.min() - pd.Timedelta(days=3))
+    _te["d1"] = _te.movie_title.map(_d1)
+    _j = p.merge(_te[["id", "date_show", "d1"]], on="id", how="left")
+    # sch_exp is applied to `p` positionally, so the join must be strictly 1:1 and in order.
+    assert len(_j) == len(p), f"id join changed row count {len(p)} -> {len(_j)} (duplicate ids?)"
+    assert (_j.id.to_numpy() == p.id.to_numpy()).all(), "id join reordered rows"
+    assert _j.date_show.notna().all(), "id join against test.csv failed"
+    _SCH = tuple(pd.Timestamp(x) for x in SCH_WINDOW)
+    _in_sch = lambda d: d.between(*_SCH).to_numpy().astype(float)
+    _sch_hist = sum(_in_sch(_j.d1 + pd.Timedelta(days=k)) for k in range(3)) / 3
+    sch_exp = _in_sch(_j.date_show) * (1 - _sch_hist)   # 1 = target in break, D1-D3 outside it
+    print(f"  school-break target rows {int((_in_sch(_j.date_show) > 0).sum()):,} | "
+          f"straddle rows (D1-D3 outside the break) {int((sch_exp > 0).sum()):,}")
+    print(f"  Lebaran rows {int(leb.sum()):,} | Ramadan straddle rows "
+          f"{int((p.ram_exp > 0).sum()):,}")
+
+    _tick = np.clip(p.ratio.to_numpy(), 0, None) * p.scale.to_numpy()
+    base_tick = np.floor(_tick + 0.5).astype(int)
+    for nm, lm, rm, sm in VARIANTS:
+        r = (p.ratio.to_numpy()
+             * np.where(leb, lm, 1.0)
+             * rm ** p.ram_exp.to_numpy()
+             * sm ** sch_exp)
+        v = np.floor(np.clip(r, 0, None) * p.scale.to_numpy() + 0.5).astype(int)
+        fn = f"submission_cal_{nm}_{_tag}.csv"
+        pd.DataFrame({"id": p.id, "total_ticket": v}).to_csv(fn, index=False)
+        print(f"  {fn}")
+        print(f"    leb x{lm} | ram x{rm} | sch x{sm} | rows changed "
+              f"{int((v != base_tick).sum()):,} | tickets {base_tick.sum():,} -> {v.sum():,}")
 
     line("P3  fit the response curve and locate the optimum")
     _ks = sorted(LB_HISTORY)
@@ -3602,7 +3639,10 @@ else:
             print("  differences of ~0.0005 between points.")
         else:
             print("\n  quadratic fit is concave (no interior minimum yet) -> keep raising m")
-        for m in LEB_MULTS:
+        # Extrapolate for the Lebaran levels this run actually writes, plus the next
+        # few steps up, so the table stays useful after the optimum is bracketed.
+        _probe_ms = sorted({lm for _, lm, _, _ in VARIANTS} | {2.2, 2.4, 2.6})
+        for m in _probe_ms:
             if m > _ks[-1]:
                 lin = _sv[-1] - ((LB_HISTORY[_ks[-2]] - _sv[-1])
                                  / (_ks[-1] - _ks[-2])) * (m - _ks[-1])
@@ -3622,8 +3662,26 @@ else:
           f"({_nram / len(p):.2%}) -- films that opened before Ramadan with target days inside")
     print("  it, so their D1-D3 scale was measured at normal demand. Films whose D1-D3 was")
     print("  already in Ramadan get ram_exp = 0 and are left alone, which is right because")
-    print("  their scale already reflects the lower level. Industry reporting puts Ramadan")
-    print("  attendance 30-40% below normal, so probe RAM_MULTS below 1.0.")
+    print("  their scale already reflects the lower level. The external Cinepoint season puts")
+    print("  Ramadan weeks at 0.33-0.61x ordinary, which is where the 0.50 variant comes from.")
+    print()
+    line("P4  with ONE submission, which variant?")
+    print("  Expected gains, using the Lebaran calibration (6.08% of rows, m 1.0 -> 2.0 gained")
+    print("  0.0215, i.e. ~0.354 per cohort row per unit of multiplier):")
+    print()
+    print("  ram0.5   2,776 rows (3.82%). The model CANNOT know about Ramadan: train.csv has")
+    print("    none of it and holidays.csv never labels it, yet these rows had their scale")
+    print("    measured at normal demand and their targets sit at ~0.45x. Predicted ratio there")
+    print("    is ~0.41, so halving it moves ~0.21 per row -> roughly -0.008 overall.")
+    print("  leb2.2   4,417 rows, direction already proven, slope at m=2.0 was 0.0111")
+    print("    -> roughly -0.002.")
+    print("  sch1.3   direction is NOT established. CELL 8's index put ordinary->school at 0.837")
+    print("    (the pre-break mid-December level is itself very high), while the external series")
+    print("    puts the break at 1.335 against ordinary Oct-Nov. Those disagree, so this one")
+    print("    needs the national index built first rather than a guessed multiplier.")
+    print()
+    print("  => SUBMIT submission_cal_ram0.5_*.csv. Largest expected gain, cleanest mechanism,")
+    print("     and it is a single-variable test against the known 0.40532 baseline.")
     print()
     print("  CAVEAT on the public split: the Lebaran cohort is 6.08% of the test set, so only")
     print("  ~1,325 of these rows are scored publicly against ~3,092 held privately. One")

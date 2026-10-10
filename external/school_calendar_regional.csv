@@ -1,0 +1,126 @@
+province,period_type,start_date,end_date,school_year,published,confidence,source
+ALL (national SEB),ramadan_selfstudy,2025-02-27,2025-03-05,2024/2025,2025-03-06,high; SEB 4/2025 signed 2025-02-27; home study 27-28 Feb + 3-5 Mar; overrides provincial Ramadan 2025 plans,https://www.detik.com/edu/sekolah/d-7808936/ini-surat-edaran-bersama-libur-lebaran-anak-sekolah-yang-maju-jadi-21-maret-2025
+ALL (national SEB),idulfitri_break,2025-03-21,2025-04-08,2024/2025,2025-03-06,high; resume 2025-04-09; overrides provincial plans,https://www.detik.com/edu/sekolah/d-7808936/ini-surat-edaran-bersama-libur-lebaran-anak-sekolah-yang-maju-jadi-21-maret-2025
+Jawa Barat,exam,2025-12-01,2025-12-14,2025/2026,2025-07-01,high; perkiraan PSAS,https://www.antaranews.com/berita/4934729/jadwal-tahun-ajaran-2025-2026-jawa-barat-mpls-asesmen-dan-libur
+Jawa Barat,break,2025-12-29,2026-01-10,2025/2026,2025-07-01,medium-high; resume 2026-01-12; Medcom 2025-07-14 agrees; Kompas 2025-08-26 says 22 Dec-3 Jan (resume 12 Jan),https://www.antaranews.com/berita/4934729/jadwal-tahun-ajaran-2025-2026-jawa-barat-mpls-asesmen-dan-libur
+Jawa Barat,ramadan_break,2026-02-20,2026-02-23,2025/2026,2025-07-01,medium; perkiraan,https://www.antaranews.com/berita/4934729/jadwal-tahun-ajaran-2025-2026-jawa-barat-mpls-asesmen-dan-libur
+Jawa Barat,idulfitri_break,2026-03-14,2026-03-28,2025/2026,2025-07-01,medium; estimasi,https://www.antaranews.com/berita/4934729/jadwal-tahun-ajaran-2025-2026-jawa-barat-mpls-asesmen-dan-libur
+Jawa Barat,exam,2025-06-09,2025-06-20,2024/2025,2025-06-17,high; also kumparan 2024-11-30,https://www.detik.com/jabar/jabar-gaskeun/d-7966684/jadwal-libur-sekolah-akhir-semester-genap-2025-di-jabar-cek-tanggalnya
+Jawa Barat,break,2025-06-30,2025-07-12,2024/2025,2025-06-17,high,https://www.detik.com/jabar/jabar-gaskeun/d-7966684/jadwal-libur-sekolah-akhir-semester-genap-2025-di-jabar-cek-tanggalnya
+Banten,exam,2025-12-01,2025-12-06,2025/2026,2025-05-29,high; SK 900.1.15/041-Dindikbud/2025,https://www.komunitasbelajar.id/2025/05/kaldik-provinsi-banten-tahun-pelajaran.html
+Banten,break,2025-12-20,2026-01-03,2025/2026,2025-05-29,high,https://www.komunitasbelajar.id/2025/05/kaldik-provinsi-banten-tahun-pelajaran.html
+Banten,ramadan_break,2026-02-18,2026-02-18,2025/2026,2025-05-29,high (planned),https://www.komunitasbelajar.id/2025/05/kaldik-provinsi-banten-tahun-pelajaran.html
+Banten,idulfitri_break,2026-03-12,2026-03-28,2025/2026,2025-05-29,high (planned),https://www.komunitasbelajar.id/2025/05/kaldik-provinsi-banten-tahun-pelajaran.html
+Banten,break,2025-06-21,2025-07-12,2024/2025,2024-06,medium; SK 900.1.15/040-Dindikbud/2024 dated 2024-04-25,https://www.ainamulyana.com/2024/06/blog-post.html
+Jawa Tengah,exam,2025-11-24,2025-12-06,2025/2026,2025-06-11,high; SK 400.3.1/07209 signed 2025-06-11; 5-day schools end 12-05,https://pdk.jatengprov.go.id/wp-content/uploads/2025/07/PEDOMAN-PENYUSUNAN-KALDIK-2025-2026-.pdf
+Jawa Tengah,break,2025-12-22,2026-01-03,2025/2026,2025-06-11,high; 5-day schools to 01-02; resume 01-05,https://pdk.jatengprov.go.id/wp-content/uploads/2025/07/PEDOMAN-PENYUSUNAN-KALDIK-2025-2026-.pdf
+Jawa Tengah,ramadan_break,2026-02-19,2026-02-19,2025/2026,2025-06-11,high (perkiraan),https://pdk.jatengprov.go.id/wp-content/uploads/2025/07/PEDOMAN-PENYUSUNAN-KALDIK-2025-2026-.pdf
+Jawa Tengah,idulfitri_break,2026-03-16,2026-03-28,2025/2026,2025-06-11,high; 16-18 before + 19 Nyepi + 20-21 IF + 23-28 after,https://pdk.jatengprov.go.id/wp-content/uploads/2025/07/PEDOMAN-PENYUSUNAN-KALDIK-2025-2026-.pdf
+Jawa Tengah,break,2025-06-23,2025-07-12,2024/2025,2024-06-05,high; signed 2024-06-05; no exam window in doc,https://disdikbud.batangkab.go.id/lamp/info/20240619142933-14-0-KALDIK_20242025_Prov_Jateng.pdf
+Jawa Timur,break,2025-12-22,2025-12-31,2025/2026,2025-05-22,high; SK 400.3/2971/101.1/2025; file dated 2025-06-11; resume 2026-01-02; exam window school-set,https://dindik.jatimprov.go.id/images/upload/KALENDER%20PENDIDIKAN%202025-2026.pdf
+Jawa Timur,ramadan_selfstudy,2026-02-20,2026-02-24,2025/2026,2025-05-22,high; KPP grid 20 21 23 24 Feb (22 Sun),https://dindik.jatimprov.go.id/images/upload/KALENDER%20PENDIDIKAN%202025-2026.pdf
+Jawa Timur,idulfitri_break,2026-03-19,2026-03-29,2025/2026,2025-05-22,high; grid 19-21 LHB + 23-24 CB + 25-28 LHR; resume 03-30,https://dindik.jatimprov.go.id/images/upload/KALENDER%20PENDIDIKAN%202025-2026.pdf
+Jawa Timur,break,2025-06-23,2025-07-12,2024/2025,2024-07-08,high; SK 400.3/3309/101.1/2024,https://www.detik.com/jatim/berita/d-7428105/kalender-pendidikan-jawa-timur-tahun-ajaran-2024-2025
+DI Yogyakarta (Kota Yogyakarta),exam,2025-12-03,2025-12-10,2025/2026,2025-07-11,medium-high; school calendar per Disdikpora Kota Yogyakarta,https://www.smpn15yk.sch.id/wp-content/uploads/2025/07/KALDIK-TA-2025-2026.pdf
+DI Yogyakarta (Kota Yogyakarta),break,2025-12-22,2025-12-31,2025/2026,2025-07-11,medium-high; resume 2026-01-02; Kompas 2025-08-26 agrees for DIY,https://www.smpn15yk.sch.id/wp-content/uploads/2025/07/KALDIK-TA-2025-2026.pdf
+DI Yogyakarta (Kota Yogyakarta),ramadan_break,2026-02-18,2026-02-20,2025/2026,2025-07-11,medium-high,https://www.smpn15yk.sch.id/wp-content/uploads/2025/07/KALDIK-TA-2025-2026.pdf
+DI Yogyakarta (Kota Yogyakarta),idulfitri_break,2026-03-16,2026-03-27,2025/2026,2025-07-11,medium-high; 16-18 akhir Ramadan + 19 Nyepi + 20-21 IF + 23-27,https://www.smpn15yk.sch.id/wp-content/uploads/2025/07/KALDIK-TA-2025-2026.pdf
+DI Yogyakarta (Kota Yogyakarta),exam,2025-06-11,2025-06-18,2024/2025,2024-07-16,high; SMP VII-VIII (SD 11-17 Jun); ASPD SMP 5-7 May; ASPD SD 19-21 May 2025,https://dindikpora.jogjakota.go.id/assets/instansi/dindikpora/files/kalender-pendidikan-tahun-ajaran-20242025-13770.pdf
+DI Yogyakarta (Kota Yogyakarta),break,2025-06-27,2025-07-11,2024/2025,2024-07-16,high,https://dindikpora.jogjakota.go.id/assets/instansi/dindikpora/files/kalender-pendidikan-tahun-ajaran-20242025-13770.pdf
+Sumatera Utara,exam,2025-12-02,2025-12-09,2025/2026,2025-07-14,medium; SMA/SMK,https://www.kalderanews.com/2025/07/14/kalender-pendidikan-provinsi-sumut-dan-sumsel-tahun-ajaran-2025-2026-catat-di-sini/
+Sumatera Utara,break,2025-12-22,2026-01-02,2025/2026,2025-06-28,high; SK 400.3/5664/SUBBAG UMUM/2025; effective 12-20 to 01-04,https://www.komunitasbelajar.id/2025/06/kalender-pendidikan-provinsi-sumatera_28.html
+Sumatera Utara,ramadan_break,2026-02-18,2026-02-20,2025/2026,2025-06-28,high (planned),https://www.komunitasbelajar.id/2025/06/kalender-pendidikan-provinsi-sumatera_28.html
+Sumatera Utara,idulfitri_break,2026-03-20,2026-03-27,2025/2026,2025-06-28,high (planned),https://www.komunitasbelajar.id/2025/06/kalender-pendidikan-provinsi-sumatera_28.html
+Sumatera Utara,exam,2025-06-02,2025-06-09,2024/2025,2025-06-07,medium-high,https://www.detik.com/sumut/berita/d-7952932/kapan-tahun-ajaran-baru-siswa-sma-di-sumut-ini-jadwalnya
+Sumatera Utara,break,2025-06-21,2025-07-12,2024/2025,2024-07-10,high; SK 400.3/5129/Subag Umum/VI/2024; detikSumut 2025-06-07 says 23 Jun-5 Jul,https://www.ainamulyana.com/2024/07/kalender-pendidikan-sumatera-utara.html
+Lampung,break,2025-12-22,2026-01-02,2025/2026,2025-07-03,high; SK 100.3.3/1241/V.01/DP.1A/2025,https://www.komunitasbelajar.id/2025/07/kalender-pendidikan-provinsi-lampung.html
+Lampung,ramadan_break,2026-02-17,2026-02-19,2025/2026,2025-07-03,medium; derived from rule,https://www.komunitasbelajar.id/2025/07/kalender-pendidikan-provinsi-lampung.html
+Lampung,idulfitri_break,2026-03-15,2026-03-27,2025/2026,2025-07-03,medium-low; derived from rule,https://www.komunitasbelajar.id/2025/07/kalender-pendidikan-provinsi-lampung.html
+Lampung,break,2025-06-16,2025-07-11,2024/2025,2025-03-09,high,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Kepulauan Riau,break,2025-12-22,2026-01-03,2025/2026,2025-08-05,high; letter B/400.3/974/DISDIK/2025 dated 2025-07-22,https://dinaspendidikan.kepriprov.go.id/pengumuman/kalender-pendidikan-tp-2025-2026-di-kepulauan-riau
+Kepulauan Riau,ramadan_break,2026-02-18,2026-02-21,2025/2026,2025-08-05,high (perkiraan),https://dinaspendidikan.kepriprov.go.id/pengumuman/kalender-pendidikan-tp-2025-2026-di-kepulauan-riau
+Kepulauan Riau,idulfitri_break,2026-03-16,2026-03-28,2025/2026,2025-08-05,high,https://dinaspendidikan.kepriprov.go.id/pengumuman/kalender-pendidikan-tp-2025-2026-di-kepulauan-riau
+Kepulauan Riau,break,2025-06-30,2025-07-12,2024/2025,2025-03-09,high,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Riau,exam,2025-12-01,2025-12-10,2025/2026,2025-06-23,high; Kpts. 528/2025,https://tirto.id/kalender-pendidikan-provinsi-riau-tahun-2025-2026-dan-link-pdf-hdf2
+Riau,break,2025-12-22,2025-12-31,2025/2026,2025-06-23,high; resume 01-05; Kompas says to 01-03,https://tirto.id/kalender-pendidikan-provinsi-riau-tahun-2025-2026-dan-link-pdf-hdf2
+Riau,ramadan_break,2026-02-18,2026-02-20,2025/2026,2025-06-23,high,https://tirto.id/kalender-pendidikan-provinsi-riau-tahun-2025-2026-dan-link-pdf-hdf2
+Riau,idulfitri_break,2026-03-16,2026-03-27,2025/2026,2025-06-23,low; generic list not Riau-specific,https://tirto.id/kalender-pendidikan-provinsi-riau-tahun-2025-2026-dan-link-pdf-hdf2
+Riau,exam,2025-06-02,2025-06-06,2024/2025,2025-06-16,medium; one Pekanbaru school,https://www.detik.com/edu/sekolah/d-7965089/jadwal-libur-akhir-semester-genap-2024-2025-di-berbagai-daerah-siswa-cek
+Riau,break,2025-06-23,2025-07-12,2024/2025,2025-06-16,medium,https://www.detik.com/edu/sekolah/d-7965089/jadwal-libur-akhir-semester-genap-2024-2025-di-berbagai-daerah-siswa-cek
+Sumatera Selatan,exam,2025-12-01,2025-12-13,2025/2026,2025-07-14,high; SK 420/10570/Set.3/Disdik.SS/2025,https://www.kalderanews.com/2025/07/14/kalender-pendidikan-provinsi-sumut-dan-sumsel-tahun-ajaran-2025-2026-catat-di-sini/
+Sumatera Selatan,break,2025-12-22,2026-01-03,2025/2026,2025-07-03,high; 22-31 Dec + 1-3 Jan off,https://sumsel.akurat.co/sumsel/3088/kalender-pendidikan-2025-2026-sma-smk-dan-slb-provinsi-sumatera-selatan
+Sumatera Selatan,ramadan_break,2026-02-18,2026-02-21,2025/2026,2025-07-14,medium; source typo,https://www.kalderanews.com/2025/07/14/kalender-pendidikan-provinsi-sumut-dan-sumsel-tahun-ajaran-2025-2026-catat-di-sini/
+Sumatera Selatan,idulfitri_break,2026-03-16,2026-03-28,2025/2026,2025-07-14,medium-high,https://www.kalderanews.com/2025/07/14/kalender-pendidikan-provinsi-sumut-dan-sumsel-tahun-ajaran-2025-2026-catat-di-sini/
+Sumatera Selatan,break,2025-06-21,2025-07-12,2024/2025,2025-06-16,"medium; end not given (likely 07-12); end date not given, set to 2025-07-12 (most common end)",https://www.kompas.tv/lifestyle/599707/jadwal-libur-sekolah-kenaikan-kelas-2025-di-27-provinsi-menurut-kalender-pendidikan
+Jambi,exam,2025-12-08,2025-12-18,2025/2026,2025-07-16,high; Kep. Gub 517/KEP.GUB/DISDIK-1.1/2025; page modified 2026-01-26,https://www.ainamulyana.org/2025/07/kalender-pendidikan-provinsi-jambi.html
+Jambi,break,2025-12-20,2026-01-03,2025/2026,2025-07-16,high; Kompas 2025-08-26 agrees,https://www.ainamulyana.org/2025/07/kalender-pendidikan-provinsi-jambi.html
+Jambi,break,2025-06-21,2025-07-12,2024/2025,2025-06-16,medium-high,https://www.kompas.tv/lifestyle/599707/jadwal-libur-sekolah-kenaikan-kelas-2025-di-27-provinsi-menurut-kalender-pendidikan
+Sumatera Barat,exam,2025-12-01,2025-12-13,2025/2026,2025-06-18,high; SK 420/471/KPTS-2025,https://tirto.id/kalender-pendidikan-sumatera-barat-tahun-2025-2026-dan-link-pdf-hc7H
+Sumatera Barat,break,2025-12-22,2026-01-03,2025/2026,2025-06-18,high,https://tirto.id/kalender-pendidikan-sumatera-barat-tahun-2025-2026-dan-link-pdf-hc7H
+Sumatera Barat,ramadan_break,2026-02-18,2026-02-18,2025/2026,2025-06-18,medium,https://tirto.id/kalender-pendidikan-sumatera-barat-tahun-2025-2026-dan-link-pdf-hc7H
+Sumatera Barat,idulfitri_break,2026-03-20,2026-03-21,2025/2026,2025-06-18,low; only Lebaran days listed,https://tirto.id/kalender-pendidikan-sumatera-barat-tahun-2025-2026-dan-link-pdf-hc7H
+Sumatera Barat,break,2025-06-22,2025-07-12,2024/2025,2025-06-16,medium-high,https://www.detik.com/edu/sekolah/d-7965089/jadwal-libur-akhir-semester-genap-2024-2025-di-berbagai-daerah-siswa-cek
+Bengkulu,break,2025-12-22,2026-01-03,2025/2026,2025-08-26,medium,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+Bengkulu,break,2025-06-23,2025-07-12,2024/2025,2025-06-16,medium,https://www.kompas.tv/lifestyle/599707/jadwal-libur-sekolah-kenaikan-kelas-2025-di-27-provinsi-menurut-kalender-pendidikan
+Kepulauan Bangka Belitung,break,2025-06-23,2025-07-12,2024/2025,2025-03-09,high; SK 188.44/059.D/SK/DINDIK/2024; 2025/26 not published before cutoff,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Sulawesi Selatan,exam,2025-11-24,2025-12-05,2025/2026,2025-07-01,high; SK 188.4/3821/DISDIK signed 2025-06-23; 24-28 Nov + 1-5 Dec,https://www.komunitasbelajar.id/p/kalender-pendidikan-provinsi-sulawesi_1.html
+Sulawesi Selatan,break,2025-12-22,2026-01-03,2025/2026,2025-07-01,high; resume 01-05,https://www.komunitasbelajar.id/p/kalender-pendidikan-provinsi-sulawesi_1.html
+Sulawesi Selatan,ramadan_selfstudy,2026-02-17,2026-02-20,2025/2026,2025-07-01,low-medium; derived from rule,https://www.komunitasbelajar.id/p/kalender-pendidikan-provinsi-sulawesi_1.html
+Sulawesi Selatan,idulfitri_break,2026-03-16,2026-03-25,2025/2026,2025-07-01,high,https://www.komunitasbelajar.id/p/kalender-pendidikan-provinsi-sulawesi_1.html
+Sulawesi Selatan,exam,2025-05-26,2025-06-06,2024/2025,2024-12-30,high; SMA,https://www.detik.com/sulsel/berita/d-7709794/kalender-pendidikan-2025-sma-di-sulsel-beserta-link-download-pdf-nya
+Sulawesi Selatan,break,2025-06-23,2025-07-12,2024/2025,2024-12-30,medium-high; SMA,https://www.detik.com/sulsel/berita/d-7709794/kalender-pendidikan-2025-sma-di-sulsel-beserta-link-download-pdf-nya
+Sulawesi Selatan (Makassar SD/SMP),exam,2025-06-16,2025-06-20,2024/2025,2025-04-07,medium,https://www.detik.com/sulsel/berita/d-7857965/tahun-ajaran-baru-2025-2026-mulai-kapan-cek-jadwalnya-di-sini
+Sulawesi Selatan (Makassar SD/SMP),break,2025-06-28,2025-07-12,2024/2025,2025-06-16,medium,https://www.detik.com/sulsel/berita/d-7966784/jadwal-libur-sekolah-juni-2025-di-berbagai-daerah-yuk-catat
+Kalimantan Timur,exam,2025-12-01,2025-12-12,2025/2026,2025-07-01,high; SK 100.3.3/2947/Disdikbud signed 2025-02-06,https://ppid.kaltimprov.go.id/dip/opd/7/2761
+Kalimantan Timur,break,2025-12-22,2026-01-03,2025/2026,2025-07-01,high,https://ppid.kaltimprov.go.id/dip/opd/7/2761
+Kalimantan Timur,ramadan_break,2026-02-16,2026-02-20,2025/2026,2025-07-01,high,https://ppid.kaltimprov.go.id/dip/opd/7/2761
+Kalimantan Timur,idulfitri_break,2026-03-16,2026-03-21,2025/2026,2025-07-01,medium,https://ppid.kaltimprov.go.id/dip/opd/7/2761
+Kalimantan Timur,break,2025-06-16,2025-07-12,2024/2025,2025-03-09,medium; Kompas 2025-06-12 says 23 Jun-12 Jul,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Kalimantan Selatan,break,2025-12-22,2026-01-03,2025/2026,2025-07-01,high,https://www.ainamulyana.info/2025/07/kalender-pendidikan-kalimantan-selatan.html
+Kalimantan Selatan,ramadan_break,2026-02-19,2026-02-21,2025/2026,2025-07-01,high,https://www.ainamulyana.info/2025/07/kalender-pendidikan-kalimantan-selatan.html
+Kalimantan Selatan,idulfitri_break,2026-03-13,2026-03-28,2025/2026,2025-07-01,high,https://www.ainamulyana.info/2025/07/kalender-pendidikan-kalimantan-selatan.html
+Kalimantan Selatan,break,2025-06-30,2025-07-19,2024/2025,2025-06-12,high; SK 0154.1/2024,https://www.detik.com/kalimantan/berita/d-7961066/libur-kenaikan-kelas-2025-sampai-kapan-ini-jadwal-di-berbagai-daerah
+Kalimantan Barat,break,2025-12-20,2026-01-03,2025/2026,2025-07-06,high,https://www.ainamulyana.info/2025/07/kalender-pendidikan-kalimantan-barat.html
+Kalimantan Barat,ramadan_break,2026-02-16,2026-02-19,2025/2026,2025-07-06,low-medium; derived from rule,https://www.ainamulyana.info/2025/07/kalender-pendidikan-kalimantan-barat.html
+Kalimantan Barat,idulfitri_break,2026-03-16,2026-03-28,2025/2026,2025-07-06,low-medium; derived from rule,https://www.ainamulyana.info/2025/07/kalender-pendidikan-kalimantan-barat.html
+Kalimantan Barat,break,2025-06-21,2025-07-05,2024/2025,2025-03-09,medium; SK 583/2024,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Kalimantan Tengah,break,2025-12-22,2025-12-31,2025/2026,2025-06-17,medium; SK 421/2007/DISDIK/VI/2025,https://tirto.id/link-unduh-kalender-pendidikan-kalteng-kaltim-ta-2025-2026-pdf-hc6n
+Kalimantan Tengah,ramadan_break,2026-02-16,2026-02-20,2025/2026,2025-06-17,medium,https://tirto.id/link-unduh-kalender-pendidikan-kalteng-kaltim-ta-2025-2026-pdf-hc6n
+Kalimantan Tengah,idulfitri_break,2026-03-12,2026-03-25,2025/2026,2025-06-17,medium,https://tirto.id/link-unduh-kalender-pendidikan-kalteng-kaltim-ta-2025-2026-pdf-hc6n
+Kalimantan Tengah,break,2025-06-23,2025-06-30,2024/2025,2025-03-09,medium; possibly to 07-12,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Kalimantan Utara,break,2025-12-22,2025-12-31,2025/2026,2025-07-12,medium; SK 400.3.8/2324/DISDIKBUD/KU/III/2025,https://www.komunitasbelajar.id/p/kalender-pendidikan-kalimantan-utara.html
+Kalimantan Utara,idulfitri_break,2026-03-18,2026-03-26,2025/2026,2025-07-12,medium,https://www.komunitasbelajar.id/p/kalender-pendidikan-kalimantan-utara.html
+Kalimantan Utara,break,2025-06-23,2025-07-12,2024/2025,2025-06-12,"low; start only; end date not given, set to 2025-07-12 (most common end)",https://www.kompas.com/jawa-timur/read/2025/06/12/062600388/kapan-liburan-kenaikan-kelas-2025-ini-jadwal-lengkap-libur-sekolah
+Sulawesi Utara,exam,2025-11-24,2025-12-10,2025/2026,2025-06-30,high; SK 050/KEP/DIKDA-01/230/VI/2025,https://www.ainamulyana.org/2025/06/kalender-pendidikan-sulawesi-utara.html
+Sulawesi Utara,break,2025-12-22,2026-01-06,2025/2026,2025-06-30,high; resume 01-07; no Ramadan break,https://www.ainamulyana.org/2025/06/kalender-pendidikan-sulawesi-utara.html
+Gorontalo,exam,2025-12-01,2025-12-12,2025/2026,2025-06-24,low; inferred,https://www.komunitasbelajar.id/2025/06/kalender-pendidikan-provinsi-gorontalo.html
+Gorontalo,break,2025-12-22,2025-12-31,2025/2026,2025-06-24,low; inferred (Kompas 2025-08-26 says to 01-03),https://www.komunitasbelajar.id/2025/06/kalender-pendidikan-provinsi-gorontalo.html
+Gorontalo,ramadan_break,2026-02-16,2026-02-20,2025/2026,2025-06-24,low; inferred,https://www.komunitasbelajar.id/2025/06/kalender-pendidikan-provinsi-gorontalo.html
+Gorontalo,idulfitri_break,2026-03-16,2026-03-25,2025/2026,2025-06-24,low; inferred,https://www.komunitasbelajar.id/2025/06/kalender-pendidikan-provinsi-gorontalo.html
+Sulawesi Tengah,exam,2025-11-24,2025-12-04,2025/2026,2025-07-20,high; SK 800.05/3404.SEK/DISDIK,https://www.ainamulyana.org/2025/07/kalender-pendidikan-provinsi-sulawesi.html
+Sulawesi Tengah,break,2025-12-22,2025-12-31,2025/2026,2025-07-20,high,https://www.ainamulyana.org/2025/07/kalender-pendidikan-provinsi-sulawesi.html
+Sulawesi Tenggara,exam,2025-12-01,2025-12-10,2025/2026,2025-07-09,medium,https://tirto.id/kalender-pendidikan-sultra-dan-sulbar-2025-2026-serta-pdf-hdQH
+Sulawesi Tenggara,break,2025-12-22,2025-12-31,2025/2026,2025-07-09,medium; resume 01-02,https://tirto.id/kalender-pendidikan-sultra-dan-sulbar-2025-2026-serta-pdf-hdQH
+Sulawesi Tenggara,idulfitri_break,2026-03-20,2026-03-21,2025/2026,2025-07-09,low; holidays only,https://tirto.id/kalender-pendidikan-sultra-dan-sulbar-2025-2026-serta-pdf-hdQH
+Sulawesi Tenggara,break,2025-06-23,2025-07-04,2024/2025,2025-03-09,medium; Kompas 2025-06-12 says to 07-12,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Sulawesi Barat,exam,2025-12-01,2025-12-10,2025/2026,2025-07-09,medium,https://tirto.id/kalender-pendidikan-sultra-dan-sulbar-2025-2026-serta-pdf-hdQH
+Sulawesi Barat,break,2025-12-22,2025-12-31,2025/2026,2025-07-09,medium,https://tirto.id/kalender-pendidikan-sultra-dan-sulbar-2025-2026-serta-pdf-hdQH
+Sulawesi Barat,ramadan_break,2026-02-19,2026-02-21,2025/2026,2025-07-09,medium,https://tirto.id/kalender-pendidikan-sultra-dan-sulbar-2025-2026-serta-pdf-hdQH
+Sulawesi Barat,idulfitri_break,2026-03-16,2026-03-21,2025/2026,2025-07-09,medium,https://tirto.id/kalender-pendidikan-sultra-dan-sulbar-2025-2026-serta-pdf-hdQH
+Sulawesi Barat,break,2025-06-23,2025-07-12,2024/2025,2025-03-09,medium-high,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Bali (Kota Denpasar),exam,2025-11-21,2025-12-03,2025/2026,2025-06-04,medium; SK 400.3.5/8951/Disdikpora/2025; body text says SD 1-6 Dec / SMP 1-5 Dec,https://esurat.denpasarkota.go.id/files/send-esign/202506/tte-3e55706ec9a65d0011f4037269081b591_conv.pdf
+Bali (Kota Denpasar),break,2025-12-22,2026-01-03,2025/2026,2025-06-04,high; resume 01-05,https://esurat.denpasarkota.go.id/files/send-esign/202506/tte-3e55706ec9a65d0011f4037269081b591_conv.pdf
+Bali (Kota Denpasar),idulfitri_break,2026-03-19,2026-03-21,2025/2026,2025-06-04,medium; Nyepi 19 + Ngembak Geni 20 + IF 20-21; no long Lebaran break; Ramadan rule only (1 day start + 1 day before IF for fasting pupils),https://esurat.denpasarkota.go.id/files/send-esign/202506/tte-3e55706ec9a65d0011f4037269081b591_conv.pdf
+Bali,exam,2025-05-15,2025-05-27,2024/2025,2024-07-11,medium,https://www.detik.com/bali/berita/d-7433292/kalender-pendidikan-sd-smp-dan-sma-tahun-ajaran-2024-2024-di-bali
+Bali,break,2025-06-23,2025-07-19,2024/2025,2025-06-12,high; two blocks 23 Jun-5 Jul and 7-19 Jul; SK B.10.400.3/5600/UPTD.BPTP/DIKPORA,https://www.detik.com/bali/berita/d-7959344/kapan-mulai-libur-sekolah-di-bali-2025-siap-siap-liburan-sebulan-penuh
+NTB,break,2025-12-22,2026-01-03,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+NTB,break,2025-06-23,2025-07-12,2024/2025,2025-03-09,high; SK 188.4/5685/UM/DIKBUD,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+NTT,break,2025-12-20,2026-01-03,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+NTT,break,2025-06-23,2025-07-12,2024/2025,2025-03-09,medium; KompasTV 2025-06-16 says 24 Jun-14 Jul,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Maluku,break,2025-12-22,2026-01-03,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+Maluku Utara,break,2025-12-22,2026-01-03,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+Maluku Utara,break,2025-06-23,2025-07-12,2024/2025,2025-03-09,high; SK 400.3.8.1/778/2024,https://www.detik.com/edu/sekolah/d-7814227/jadwal-libur-sekolah-semester-genap-2024-2025-dari-aceh-hingga-maluku-utara
+Papua,break,2025-12-19,2026-01-03,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+Papua Barat,break,2025-12-22,2026-01-03,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+Papua Barat Daya,break,2025-12-21,2026-01-04,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun
+Papua Tengah,break,2025-12-22,2026-01-03,2025/2026,2025-08-26,low-medium; secondary summary,https://www.kompas.com/edu/read/2025/08/26/145000771/kalender-pendidikan-2025-2026-di-38-provinsi-cek-libur-sekolah-akhir-tahun

@@ -87,6 +87,24 @@ test = pd.DataFrame(te_rows, columns=["movie_title", "cinema_ids", "city_name", 
 test.insert(0, "id", np.arange(1, len(test) + 1))
 test.to_csv(SMOKE / "test.csv", index=False)
 pd.DataFrame({"id": test.id, "total_ticket": 100.0}).to_csv(SMOKE / "sample_submission.csv", index=False)
+
+# ------------------------------------------- v5_test_pred_*.csv for CELL 25/26
+# Without this file CELL 25 takes its "no predictions found" branch and the whole
+# variant-building body is never executed, which hid a NameError on `leb`.
+# Schema must match what CELL 20 saves: id, ratio, scale, h, leb, ram_exp.
+_p = test.copy()
+_p["d1"] = _p.movie_title.map(_p.groupby("movie_title").date_show.min() - pd.Timedelta(days=3))
+_p["h"] = (_p.date_show - _p.d1).dt.days
+_leb = (_p.date_show.between("2026-03-21", "2026-03-27") & (_p.d1 <= "2026-03-18"))
+_RAM = (pd.Timestamp("2026-02-17"), pd.Timestamp("2026-03-19"))
+_inram = lambda d: d.between(*_RAM).to_numpy().astype(float)
+_rx = _inram(_p.date_show) * (1 - sum(_inram(_p.d1 + pd.Timedelta(days=k)) for k in range(3)) / 3)
+pd.DataFrame({"id": _p.id, "ratio": RNG.uniform(0, 2, len(_p)).round(4),
+              "scale": RNG.integers(1, 400, len(_p)), "h": _p.h,
+              "leb": _leb.astype(int), "ram_exp": _rx}
+             ).to_csv(SMOKE / "v5_test_pred_smoke000000.csv", index=False)
+print(f"synthetic v5_test_pred: Lebaran rows {int(_leb.sum())}, "
+      f"Ramadan-straddle rows {int((_rx > 0).sum())}")
 # a fake finished submission so CELL 7 has something to diagnose, with plenty of
 # exact zeros at the long horizons (the case that matters)
 _decay = np.array([0.9, 0.7, 0.5, 0.35, 0.2, 0.12, 0.08])
