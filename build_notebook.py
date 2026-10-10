@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 22
+NB_VERSION = 23
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -3486,59 +3486,88 @@ print(f"\n[CELL 24] {time.time() - t0:.1f}s")
 """)
 
 md(r"""
-## CELL 25 — the Lebaran probe: the last lever, and an honest bet
+## CELL 25 — the calendar probes: Lebaran is live, Ramadan is closed
 
-Offline search is finished. CELL 24 rejected all fourteen remaining hyperparameter candidates
-with proper statistics, features were exhausted earlier, and post-processing is at its optimum.
-The proxy cannot resolve anything below ~0.002 (three LB readings give offsets of 0.00848,
-0.00893, 0.00725).
+**Ramadan is settled: `ram0.5` scored 0.40527 against 0.40532, a gain of +0.00005.**
 
-One quantity has never been measured, and it **cannot** be measured offline. `train.csv` begins on
-2025-04-01, which is Eid+1, so **no training window has its observation days before Eid and its
-target days after**. The 2026 cohort is exactly that shape: 7 films open 2026-03-18, their D1-D3
-falls at the end of Ramadan when demand is low, and their D4-D10 lands in Idulfitri week when it
-is high. 4,417 rows, 6.08% of the test set.
+That is not a weak positive, it is a structural zero, and P5 below turns it into a measurement.
+The probe displaced a computable amount of prediction mass; because MASE divides by each pair's
+own `scale`, that displacement is a hard ceiling on the gain. We realised well under 1% of it.
 
-What is known:
+A near-exact zero under a *large* perturbation (halving) means the displaced mass split evenly
+between moving toward the truth and away from it — i.e. the model's prediction already sits at
+the conditional **median** of the truth on those rows, which is precisely the MAE optimum. There
+is nothing left to collect there at any multiplier, in either direction.
 
-- the model predicts a mean ratio near **1.09** on those rows;
-- CELL 8 measured the Eid market ratio at **1.52-2.41** (mean ~2.1) from the 2025 aftermath, and
-  normal decay is ~0.5, giving an expected ratio of about **1.05** — which is what the model
-  already does;
-- but `FINDINGS.md` measured train's Eid-window rows at a median `y/scale` of **1.88** against
-  0.357 on ordinary days.
+**Round 4 predicted this and was overruled.** The ledger recorded v4 predicting a 0.4116 mean
+ratio on Ramadan rows against ~0.519 × 0.811 = 0.421 expected, and concluded *"it argues against
+Ramadan as the first probe."* P4 overrode it because the external Cinepoint season put Ramadan at
+0.33–0.61× ordinary. Both readings were correct and not in conflict: the external factor describes
+the **national market level**, while the model's prediction already contains whatever level its
+features encode. The method lesson:
 
-Those two readings disagree, and no offline experiment can break the tie. CELL 7 bounded the
-recoverable MASE at **0.0058** (if the model is already right) up to **0.0552** (if the true ratio
-is 2.0).
+> When a measurement of the model's **own predictions** on a cohort disagrees with an external
+> **market-level** prior, the measurement wins. A market factor is only actionable to the extent
+> the model has no observational handle on that regime.
 
-**So this is a bet, not an analysis.** The risk is close to symmetric: at a 1.4x multiplier,
-roughly **+0.025 if the truth is 1.5x, and -0.027 if the model is already correct**. A 1.2x
-multiplier halves both tails. The cell writes several multipliers so you can spend one submission
-on the smallest informative step rather than the biggest one.
+That rule is quantitative, and round 1 already measured the handle — cross-film coverage, the
+share of rows whose target date is observed by another film's D1–D3 in `test_history.csv`:
+
+| cohort | cross-film coverage | market correction measured on the LB |
+|---|---|---|
+| Eid week | **0.0%** | **−0.0215 and still falling** |
+| school break (Dec 20 – Jan 4) | 53.8% | untested |
+| Ramadan | 72.8% | **+0.00005 — nothing** |
+
+Two points is a thin pattern, but the mechanism is sound and it explains both: `test_history.csv`
+stops on 2026-03-20, so no film ever observes Eid week, while Ramadan is three-quarters covered
+and the model reads its level off other films. It also *downgrades the national daily index*
+(open question 3) — a per-date market correction is the same class of fix that just measured zero
+on the cohort where the model could already see the regime.
+
+### Lebaran: the arm is well-characterised and still paying
+
+Seven LB readings, and a quadratic now fits them with residuals of **±0.0001**:
+
+| m | 1.0 | 1.15 | 1.2 | 1.4 | 1.6 | 1.8 | 2.0 |
+|---|-----|------|-----|-----|-----|-----|-----|
+| LB | 0.42677 | 0.42213 | 0.42057 | 0.41518 | 0.41080 | 0.40754 | **0.40532** |
+
+Segment slopes fall monotonically: 0.0309, 0.0312, 0.0270, 0.0219, 0.0163, 0.0111 per unit m.
+Extrapolating the *slope* to zero puts the turn at m ≈ 2.36, which agrees with the quadratic
+vertex of 2.35 — two different readings of the same data, so the vertex is a real estimate rather
+than the artefact of fitting a parabola to a monotone sequence. The slope is still +0.0111 at
+m = 2.0, so gain remains on the table.
+
+The probe is **m = 2.4**: it is the predicted optimum under the quadratic (0.40376) and it still
+discriminates, because the linear reading of the same arm says 0.40088. A 0.0029 spread is
+unambiguous on a deterministic leaderboard. `m = 2.6` is written too, so the follow-up needs no
+re-run, but it sits past the estimated vertex and is not the first choice.
 
 Needs `v5_test_pred_<fingerprint>.csv` from CELL 20. No training, runs in seconds.
+
+For the record, the standing reason this cohort can only be measured on the leaderboard:
+`train.csv` begins 2025-04-01, which is Eid+1, so **no training window has its observation days
+before Eid and its target days after**. The 2026 cohort is exactly that shape — 7 films open
+2026-03-18 with D1–D3 in the late-Ramadan trough and D4–D10 inside Idulfitri week.
 """)
 code(r"""
 # CELL 25 — LEBARAN / RAMADAN PROBE VARIANTS (no training)
 t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 
-# Named variants (leb, ram, sch). The baseline (2.0, 1.0, 1.0) is the known 0.40532 file,
-# so every variant below is a clean single-variable test against it.
+# Named variants (leb, ram, sch). The reference is (2.0, 1.0, 1.0) = the known 0.40532
+# file, so every variant below is a clean single-variable test against it.
 #
-# Multipliers are now informed by external/cinepoint/cinepoint_daily_top_prev.csv -- two
-# complete pre-cutoff Oct-Mar seasons, the calendar window train.csv cannot contain. Its
-# day-of-week-adjusted national factors (baseline ordinary Oct-Nov 2024):
-#   Dec 20 - Jan 4 school break 1.335 | Jan 5 - Feb 14 ordinary 0.828
-#   Ramadan wk1-4 0.415 / 0.358 / 0.331 / 0.609   -> Ramadan is ~0.45x ordinary
-#   Eid+0..+8 2.29 3.39 3.85 3.12 2.62 2.19 2.42 5.26 4.96
-#   late-Ramadan -> Eid-week ratio 6.23x
+# Only the Lebaran arm is still live. ram x0.5 measured +0.00005 (0.40527 vs 0.40532) and
+# P5 shows that is a true zero rather than a weak positive, so the Ramadan straddle is
+# closed at any multiplier. sch is parked: its direction is unestablished, CELL 8's index
+# and the external series disagree (0.837 vs 1.335), and the Ramadan null is evidence
+# against market-level corrections wherever the model can already see the regime.
 VARIANTS = [
-    ("ram0.5",        2.0, 0.50, 1.0),   # <<< the one to submit first: see P4
-    ("leb2.2",        2.2, 1.00, 1.0),
-    ("sch1.3",        2.0, 1.00, 1.3),
-    ("ram0.5_sch1.3", 2.0, 0.50, 1.3),
+    ("leb2.4", 2.4, 1.00, 1.0),   # <<< submit this one: the estimated vertex, see P4
+    ("leb2.6", 2.6, 1.00, 1.0),   # follow-up if the arm turns out to be linear
+    # ("sch1.3", 2.0, 1.00, 1.3), # re-enable only after the Lebaran arm is closed
 ]
 SCH_WINDOW = ("2025-12-20", "2026-01-04")   # the year-end school break in the test period
 
@@ -3546,6 +3575,8 @@ SCH_WINDOW = ("2025-12-20", "2026-01-04")   # the year-end school break in the t
 # here; P3 fits the left arm and extrapolates, which beats reasoning about it by hand.
 LB_HISTORY = {1.0: 0.42677, 1.15: 0.42213, 1.2: 0.42057,
               1.4: 0.41518, 1.6: 0.41080, 1.8: 0.40754, 2.0: 0.40532}
+# Ramadan straddle multiplier, measured at leb=2.0. Both points are real LB readings.
+RAM_HISTORY = {1.0: 0.40532, 0.5: 0.40527}
 
 _preds = sorted(Path(".").glob("v5_test_pred_*.csv"))
 if not _preds:
@@ -3657,31 +3688,77 @@ else:
     print(f"  ratio of {float(p.loc[p.leb == 1, 'ratio'].mean()):.3f} x m. FINDINGS.md measured")
     print("  train's Eid-window median y/scale at 1.880, which corresponds to m ~ 1.8.")
     print()
-    _nram = int((p.ram_exp > 0).sum())
-    print(f"  RAMADAN is the untested cohort: {_nram:,} straddle rows "
-          f"({_nram / len(p):.2%}) -- films that opened before Ramadan with target days inside")
-    print("  it, so their D1-D3 scale was measured at normal demand. Films whose D1-D3 was")
-    print("  already in Ramadan get ram_exp = 0 and are left alone, which is right because")
-    print("  their scale already reflects the lower level. The external Cinepoint season puts")
-    print("  Ramadan weeks at 0.33-0.61x ordinary, which is where the 0.50 variant comes from.")
+    # Slope-to-zero crossing: an independent read of the same data. If it agrees with
+    # the quadratic vertex, the vertex is a real estimate and not an artefact of fitting
+    # a parabola to a monotone sequence.
+    _mids = np.array([(a + b) / 2 for a, b in zip(_ks, _ks[1:])])
+    _slp = np.array([(LB_HISTORY[a] - LB_HISTORY[b]) / (b - a)
+                     for a, b in zip(_ks, _ks[1:])])
+    if len(_mids) >= 3:
+        _s1, _s0 = np.polyfit(_mids, _slp, 1)
+        if _s1 < -1e-9:
+            print(f"\n  slope decays linearly at {_s1:+.5f} per unit m and reaches zero at "
+                  f"m = {-_s0 / _s1:.2f}")
+            print("  Two independent reads of the same arm. If they agree, believe the vertex.")
+
+    line("P5  what the ram0.5 null actually measured")
+    # MASE = mean(|y - v| / scale), so displacing a row's integer prediction by d moves its
+    # contribution by at most d / scale. Summed over displaced rows that is a hard ceiling
+    # on the gain any multiplier on this cohort could ever produce.
+    _ref_r = p.ratio.to_numpy() * np.where(leb, 2.0, 1.0)          # the shipped 0.40532 file
+    _ref_v = np.floor(np.clip(_ref_r, 0, None) * p.scale.to_numpy() + 0.5).astype(int)
+    _ram_v = np.floor(np.clip(_ref_r * 0.5 ** p.ram_exp.to_numpy(), 0, None)
+                      * p.scale.to_numpy() + 0.5).astype(int)
+    _moved = _ram_v != _ref_v
+    _D = float((np.abs(_ram_v - _ref_v) / p.scale.to_numpy()).sum() / len(p))
+    _G = RAM_HISTORY[1.0] - RAM_HISTORY[0.5]
+    print(f"  Ramadan straddle rows {int((p.ram_exp > 0).sum()):,} | integer prediction "
+          f"actually displaced on {int(_moved.sum()):,}")
+    print(f"  displacement D = {_D:.5f} MASE units  <- the absolute ceiling on the gain")
+    print(f"  measured gain G = {_G:+.5f}            <- {100 * _G / _D:+.2f}% of that ceiling")
     print()
-    line("P4  with ONE submission, which variant?")
-    print("  Expected gains, using the Lebaran calibration (6.08% of rows, m 1.0 -> 2.0 gained")
-    print("  0.0215, i.e. ~0.354 per cohort row per unit of multiplier):")
+    # For a one-sided move of size d: the row gains d if the truth lies beyond the new
+    # prediction, loses d if it lies on the far side of the old one, and lands in between
+    # otherwise. Writing f for the share of displaced mass that moved TOWARD the truth,
+    # G = D * (2f - 1), so f = (1 + G/D) / 2. f = 0.5 means perfectly balanced.
+    _f = (1 + _G / _D) / 2
+    print(f"  implied share of displaced mass that moved TOWARD the truth: f = {_f:.4f}")
+    print("  (f = 0.5 is perfect balance: as much mass moved away as toward)")
     print()
-    print("  ram0.5   2,776 rows (3.82%). The model CANNOT know about Ramadan: train.csv has")
-    print("    none of it and holidays.csv never labels it, yet these rows had their scale")
-    print("    measured at normal demand and their targets sit at ~0.45x. Predicted ratio there")
-    print("    is ~0.41, so halving it moves ~0.21 per row -> roughly -0.008 overall.")
-    print("  leb2.2   4,417 rows, direction already proven, slope at m=2.0 was 0.0111")
-    print("    -> roughly -0.002.")
-    print("  sch1.3   direction is NOT established. CELL 8's index put ordinary->school at 0.837")
-    print("    (the pre-break mid-December level is itself very high), while the external series")
-    print("    puts the break at 1.335 against ordinary Oct-Nov. Those disagree, so this one")
-    print("    needs the national index built first rather than a guessed multiplier.")
+    if abs(_f - 0.5) < 0.02:
+        print("  => The prediction already sat at the CONDITIONAL MEDIAN of the truth on these")
+        print("     rows, which is exactly the MAE optimum. Halving it moved as much mass away")
+        print("     from the truth as toward it. No multiplier can win here, in EITHER")
+        print("     direction, so the Ramadan straddle is closed -- not under-corrected.")
+    else:
+        print(f"  => f is {_f:.3f}, not balanced; re-read this before closing the cohort.")
     print()
-    print("  => SUBMIT submission_cal_ram0.5_*.csv. Largest expected gain, cleanest mechanism,")
-    print("     and it is a single-variable test against the known 0.40532 baseline.")
+    print("  Contrast with Lebaran, where the same algebra at m 1.0 -> 2.0 gives f well above")
+    print("  0.5. The difference is the model's observational handle on the regime: round 1")
+    print("  measured cross-film coverage at 0.0% for Eid week against 72.8% for Ramadan.")
+    print("  test_history.csv stops on 2026-03-20, so no film ever observes Eid week, while")
+    print("  Ramadan is three-quarters covered and the model reads its level off other films.")
+
+    line("P6  with ONE submission, which variant?")
+    print("  leb2.4   THE PROBE. Quadratic vertex 2.35 and the slope-to-zero crossing agree,")
+    print("    so 2.4 is the predicted optimum (0.40376) and only mild extrapolation. The")
+    print("    linear reading of the same arm says 0.40088; a 0.0029 spread is unambiguous on")
+    print("    a deterministic leaderboard, so this both banks gain AND settles the shape.")
+    print("  leb2.6   written so the follow-up needs no re-run, but it sits past the estimated")
+    print("    vertex. Submit it only if 2.4 comes in near the LINEAR prediction.")
+    print("  ram      closed by P5 at any multiplier.")
+    print("  sch      parked. 2,067 straddle rows, direction unestablished, and P5's coverage")
+    print("    rule puts it at 53.8% -- between Eid's 0.0% and Ramadan's 72.8% -- so expect a")
+    print("    partial effect at best. It is the next cohort to probe once Lebaran closes.")
+    print()
+    print("  => SUBMIT submission_cal_leb2.4_*.csv")
+    print()
+    print("  How to read the result:")
+    print("    ~0.4038  the quadratic is right, vertex ~2.35, this arm is nearly closed.")
+    print("    ~0.4009  the arm is still linear; the external 6.23x factor is in play. Submit")
+    print("             leb2.6 next, then keep going.")
+    print("    > 0.40532  we have overshot: the true vertex lies between 2.0 and 2.4. Bisect")
+    print("             to 2.2 and stop.")
     print()
     print("  CAVEAT on the public split: the Lebaran cohort is 6.08% of the test set, so only")
     print("  ~1,325 of these rows are scored publicly against ~3,092 held privately. One")
@@ -4247,6 +4324,54 @@ feature bundles S/P/R, extra windows, four learning rates, `feature_fraction`, `
 `film_curve`, sibling-format features, cross-film cluster-date features, two-stage pair totals,
 showtime features, the absorbing-zero constraint, monotone recalibration, the rounded objective,
 a third model class in the blend, and scale-reweighted training.
+
+### ROUND 7 — the external factors meet the leaderboard, and one of them measures zero
+
+The Cinepoint prior season gave the first measured priors for the three calendar cohorts
+`train.csv` cannot teach. The first one tested on the leaderboard **did not transfer**:
+
+| probe | rows | external prior | LB | gain |
+|---|---|---|---|---|
+| Lebaran m 1.0 → 2.0 | 4,417 (6.08%) | late-Ramadan → Eid 6.23× | 0.42677 → 0.40532 | **−0.02145** |
+| **Ramadan straddle ×0.5** | 2,776 (3.82%) | Ramadan wk1–4 0.33–0.61× | 0.40532 → **0.40527** | **+0.00005** |
+
+**+0.00005 is a true zero, not a weak positive.** The probe displaced a computable amount of
+prediction mass, and because MASE divides by each pair's own `scale`, that displacement is a hard
+ceiling on the gain. Under 1% of it was realised. For a *large* perturbation (halving), a
+near-exact zero means the displaced mass split evenly between moving toward the truth and away
+from it — the prediction was already at the conditional **median**, which is the MAE optimum.
+CELL 25 P5 computes the implied balance `f = (1 + G/D)/2` and gets f ≈ 0.50.
+
+So the Ramadan straddle is **closed at any multiplier, in either direction** — not
+under-corrected. Round 4 said so (v4 predicting 0.4116 against ~0.421 expected, *"it argues
+against Ramadan as the first probe"*) and was overruled by the external factor. Both readings were
+right and never actually conflicted: the external factor describes the **national market level**,
+while the model's prediction already contains whatever level its features encode.
+
+**The method rule, and it is quantitative.** A market-level prior is actionable only where the
+model has no observational handle on the regime. Round 1 already measured that handle — the share
+of rows whose target date is observed by another film's D1–D3 in `test_history.csv`:
+
+| cohort | cross-film coverage | market correction, measured |
+|---|---|---|
+| Eid week | **0.0%** | **−0.0215 and still falling** |
+| school break (Dec 20 – Jan 4) | 53.8% | untested |
+| Ramadan | 72.8% | **+0.00005 — nothing** |
+
+`test_history.csv` stops on 2026-03-20, so no film ever observes Eid week; Ramadan is
+three-quarters covered and the model reads its level off other films. Two points is a thin
+pattern, but it explains both results and it makes a falsifiable prediction: the Dec school break,
+at 53.8%, should yield a *partial* effect at best.
+
+**This downgrades the national daily index (open question 3).** A per-date market correction is
+the same class of fix that just measured zero on the cohort where the model could already see the
+regime. Its remaining value is concentrated in exactly the rows the cheap scalar already covers.
+
+**The Lebaran arm, by contrast, is well characterised.** Seven readings; segment slopes fall
+monotonically 0.0309 → 0.0111 per unit m; a quadratic fits with residuals of **±0.0001** and puts
+the vertex at 2.35, and extrapolating the *slope* to zero independently gives 2.36. Two different
+reads of the same data agreeing is what makes the vertex an estimate rather than the artefact of
+fitting a parabola to a monotone sequence. Next probe m = 2.4.
 
 ### Mistakes worth not repeating
 

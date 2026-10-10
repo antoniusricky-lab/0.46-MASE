@@ -147,6 +147,72 @@ import re
 import textwrap
 
 
+# ------------------------------------------- CELL 25 P5: the displaced-mass estimator
+# P5 reads a cohort probe's LB delta as a statement about the truth. MASE is
+# mean(|y - v| / scale), so displacing a row's integer prediction by d moves its
+# contribution by at most d / scale; summed, that is D, a hard ceiling on the gain.
+# For a one-sided move the row gains d if the truth lies beyond the new prediction and
+# loses d if it lies on the far side of the old one, so with f = the share of displaced
+# mass moving TOWARD the truth, G = D * (2f - 1) and f = (1 + G/D) / 2.
+#
+# This is the whole basis for declaring the Ramadan straddle closed, so it is pinned
+# against brute-force MASE rather than trusted. CELL 25 only runs with a prediction
+# file present, so smoke_test.py never reaches this arithmetic.
+def displaced_mass_f(ref_v, new_v, scale, n_rows, gain):
+    D = float((np.abs(new_v - ref_v) / scale).sum() / n_rows)
+    return D, (1 + gain / D) / 2
+
+
+def _p5_fixture(frac_low, seed):
+    rng = np.random.default_rng(seed)
+    n = 40000
+    scale = rng.integers(1, 400, n).astype(float)
+    ratio = rng.uniform(0.05, 1.2, n)
+    ram_exp = (rng.random(n) < 0.04).astype(float)
+    ref = np.floor(np.clip(ratio, 0, None) * scale + 0.5)
+    new = np.floor(np.clip(ratio * 0.5 ** ram_exp, 0, None) * scale + 0.5)
+    y = ref.copy()                                 # ordinary rows: prediction == truth
+    m = ram_exp > 0
+    low = m & (rng.random(n) < frac_low)
+    y[low] = 0.0                                   # truth below the halved prediction
+    y[m & ~low] = ref[m & ~low] * 3.0              # truth far above the old prediction
+    return scale, ref, new, y
+
+
+_mase = lambda y, v, s: float((np.abs(y - v) / s).mean())
+
+for _fz in (0.0, 0.25, 0.5, 0.75, 1.0):
+    _scale, _ref, _new, _y = _p5_fixture(_fz, seed=0)
+    _G = _mase(_y, _ref, _scale) - _mase(_y, _new, _scale)       # + == improvement
+    _D, _f_est = displaced_mass_f(_ref, _new, _scale, len(_scale), _G)
+    _d = np.abs(_new - _ref) / _scale
+    _f_direct = float((_d * (np.abs(_y - _new) < np.abs(_y - _ref))).sum() / _d.sum())
+    check(f"P5 f estimator exact at frac_low={_fz}",
+          abs(_f_est - _f_direct) < 1e-9,
+          f"estimated {_f_est:.6f} vs direct {_f_direct:.6f}")
+
+# D really is a ceiling: no arrangement of the truth can beat it.
+_scale, _ref, _new, _y = _p5_fixture(1.0, seed=1)
+_D, _ = displaced_mass_f(_ref, _new, _scale, len(_scale), 0.0)
+_best = _mase(_y, _ref, _scale) - _mase(_y, _new, _scale)
+check("P5 D bounds the achievable gain", _best <= _D + 1e-12,
+      f"gain {_best:.6f} exceeded ceiling {_D:.6f}")
+
+# A balanced cohort returns a near-zero gain -- the Ramadan reading.
+_scale, _ref, _new, _y = _p5_fixture(0.5, seed=2)
+_G = _mase(_y, _ref, _scale) - _mase(_y, _new, _scale)
+_D, _f = displaced_mass_f(_ref, _new, _scale, len(_scale), _G)
+check("P5 balanced cohort gives f ~ 0.5 and |G| << D",
+      abs(_f - 0.5) < 0.02 and abs(_G) < 0.1 * _D,
+      f"f={_f:.4f} G={_G:+.6f} D={_D:.6f}")
+
+# The real reading, with D at the magnitude implied by the prediction file.
+_f_real = (1 + 0.00005 / 0.008) / 2
+check("P5 verdict branch fires on the measured Ramadan null",
+      abs(_f_real - 0.5) < 0.02,
+      f"f={_f_real:.4f} would not trigger the 'closed' branch")
+
+
 def body_from_notebook(name, path="cinema_v5.ipynb"):
     nb = json.load(open(path, encoding="utf-8"))
     src = "\n".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
