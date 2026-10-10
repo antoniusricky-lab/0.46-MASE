@@ -1,6 +1,9 @@
 cache/
 .ipynb_checkpoints/
 local_config.json
+# generated at runtime by v5_pipeline.load_modules_v5(): a copy of 0.43715.py
+# under the name Sam's v5 imports. Not a source file.
+cinema_forecasting_v4.py
 *.pyc
 __pycache__/
 results/
