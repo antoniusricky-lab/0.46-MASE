@@ -147,70 +147,102 @@ import re
 import textwrap
 
 
-# ------------------------------------------- CELL 25 P5: the displaced-mass estimator
-# P5 reads a cohort probe's LB delta as a statement about the truth. MASE is
-# mean(|y - v| / scale), so displacing a row's integer prediction by d moves its
-# contribution by at most d / scale; summed, that is D, a hard ceiling on the gain.
-# For a one-sided move the row gains d if the truth lies beyond the new prediction and
-# loses d if it lies on the far side of the old one, so with f = the share of displaced
-# mass moving TOWARD the truth, G = D * (2f - 1) and f = (1 + G/D) / 2.
+# ------------------------------------ CELL 25 P5: convexity of the cohort multiplier
+# A cohort multiplier m scales the predicted ratio r, so with u = y/scale the cohort's
+# MASE contribution is S(m) = (1/N) sum |u - m*r|. That is a sum of absolute values of
+# functions AFFINE in m, hence CONVEX in m, minimised at the r-weighted median of u/r.
 #
-# This is the whole basis for declaring the Ramadan straddle closed, so it is pinned
-# against brute-force MASE rather than trusted. CELL 25 only runs with a prediction
-# file present, so smoke_test.py never reaches this arithmetic.
-def displaced_mass_f(ref_v, new_v, scale, n_rows, gain):
-    D = float((np.abs(new_v - ref_v) / scale).sum() / n_rows)
-    return D, (1 + gain / D) / 2
+# The consequence that matters: two probes at equal height sit on opposite walls of the
+# V and BRACKET an interior optimum. v23 read S(0.5) ~ S(1.0) as "no effect, cohort
+# closed", which is the opposite of what convexity implies, and shipped it.
+#
+# The v23 estimator f = (1 + G/D)/2 assumed every displaced row gains or loses the FULL
+# displacement. That holds only when the truth lies OUTSIDE the interval between the two
+# predictions. Its fixture placed truth only at k = 0 and k = 3, so it never built a row
+# in the 0.5 < k < 1 band where the assumption fails -- and agreement to 1e-9 therefore
+# proved only that the formula is exact where it is exact. These tests sweep k ACROSS
+# that band, which is the regime that actually decides the recommendation.
+def S(m, u, r, n_rows):
+    return float(np.abs(u - m * r).sum() / n_rows)
 
 
-def _p5_fixture(frac_low, seed):
-    rng = np.random.default_rng(seed)
-    n = 40000
-    scale = rng.integers(1, 400, n).astype(float)
-    ratio = rng.uniform(0.05, 1.2, n)
-    ram_exp = (rng.random(n) < 0.04).astype(float)
-    ref = np.floor(np.clip(ratio, 0, None) * scale + 0.5)
-    new = np.floor(np.clip(ratio * 0.5 ** ram_exp, 0, None) * scale + 0.5)
-    y = ref.copy()                                 # ordinary rows: prediction == truth
-    m = ram_exp > 0
-    low = m & (rng.random(n) < frac_low)
-    y[low] = 0.0                                   # truth below the halved prediction
-    y[m & ~low] = ref[m & ~low] * 3.0              # truth far above the old prediction
-    return scale, ref, new, y
+# -- 1. the exact break-even: at k = (1 + m^a)/2 the two probes score identically
+for _a in (1.0, 0.75, 0.5, 0.25):
+    _r, _m = 0.41, 0.5
+    _k_be = (1 + _m ** _a) / 2
+    _u = _k_be * _r
+    check(f"break-even k=(1+m^a)/2 ties the probes at a={_a}",
+          abs(abs(_u - _r) - abs(_u - _r * _m ** _a)) < 1e-12,
+          "the two multipliers should score this row identically")
 
+# the multiplier that predicts the break-even row exactly is k^(1/a), ~0.72-0.75
+_imp = [((1 + 0.5 ** a) / 2) ** (1 / a) for a in (1.0, 0.75, 0.5, 0.25)]
+check("implied optimum is 0.70-0.76 across the whole exponent range",
+      all(0.70 <= v <= 0.76 for v in _imp),
+      f"implied multipliers {[round(v, 4) for v in _imp]}")
 
-_mase = lambda y, v, s: float((np.abs(y - v) / s).mean())
+# -- 2. v23's estimator is WRONG inside the band, and right outside it ----------------
+# This is the test the v23 fixture structurally could not perform.
+_r = 0.41
+_bad_in_band, _ok_outside = [], []
+for _k in (0.0, 0.2, 0.4, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0, 1.5, 3.0):
+    _u = _k * _r
+    _true_gain = abs(_u - _r) - abs(_u - 0.5 * _r)      # + == halving improves
+    _d = 0.5 * _r                                        # the displacement ceiling
+    _binary = _d if abs(_u - 0.5 * _r) < abs(_u - _r) else -_d   # v23's assumption
+    (_bad_in_band if 0.5 < _k < 1.0 else _ok_outside).append(
+        abs(_true_gain - _binary))
+check("v23 estimator is exact OUTSIDE the 0.5<k<1 band",
+      max(_ok_outside) < 1e-12, f"max error {max(_ok_outside):.2e}")
+check("v23 estimator is WRONG INSIDE the 0.5<k<1 band (the untested regime)",
+      max(_bad_in_band) > 0.1 * 0.5 * _r,
+      f"max error {max(_bad_in_band):.4f} -- if this is small the test has no power")
 
-for _fz in (0.0, 0.25, 0.5, 0.75, 1.0):
-    _scale, _ref, _new, _y = _p5_fixture(_fz, seed=0)
-    _G = _mase(_y, _ref, _scale) - _mase(_y, _new, _scale)       # + == improvement
-    _D, _f_est = displaced_mass_f(_ref, _new, _scale, len(_scale), _G)
-    _d = np.abs(_new - _ref) / _scale
-    _f_direct = float((_d * (np.abs(_y - _new) < np.abs(_y - _ref))).sum() / _d.sum())
-    check(f"P5 f estimator exact at frac_low={_fz}",
-          abs(_f_est - _f_direct) < 1e-9,
-          f"estimated {_f_est:.6f} vs direct {_f_direct:.6f}")
+# -- 3. S(m) is convex, so equal endpoints bracket an interior optimum ----------------
+_rng = np.random.default_rng(11)
+_n, _N = 2776, 72611
+for _sig in (0.25, 0.6, 1.0, 1.4):
+    _r = np.clip(_rng.lognormal(np.log(0.41), 0.6, _n), 0.01, None)
+    _k = _rng.lognormal(0, _sig, _n) / np.exp(_sig ** 2 / 2)
+    # centre k so that S(1.0) - S(0.5) == +0.00005, the measured null
+    _lo, _hi = 0.05, 5.0
+    for _ in range(100):
+        _mid = (_lo + _hi) / 2
+        _u = _mid * _k * _r
+        if S(1.0, _u, _r, _N) - S(0.5, _u, _r, _N) > 0.00005:
+            _lo = _mid
+        else:
+            _hi = _mid
+    _u = (_lo + _hi) / 2 * _k * _r
+    _grid = np.linspace(0.2, 1.3, 1101)
+    _vals = np.array([S(m, _u, _r, _N) for m in _grid])
+    _mstar = float(_grid[int(_vals.argmin())])
+    _gain = S(1.0, _u, _r, _N) - _vals.min()
+    check(f"null brackets an interior optimum, not m=1, at k-spread {_sig}",
+          0.70 <= _mstar <= 0.80 and _gain > 0,
+          f"m*={_mstar:.3f} gain={_gain:.5f} -- v23 claimed the optimum was m=1")
+    # midpoint convexity: S(0.75) can never exceed the mean of the two endpoints
+    check(f"convexity caps the m=0.75 downside at k-spread {_sig}",
+          S(0.75, _u, _r, _N) <= (S(1.0, _u, _r, _N) + S(0.5, _u, _r, _N)) / 2 + 1e-12,
+          "S(0.75) exceeded the endpoint mean, so S is not convex as claimed")
 
-# D really is a ceiling: no arrangement of the truth can beat it.
-_scale, _ref, _new, _y = _p5_fixture(1.0, seed=1)
-_D, _ = displaced_mass_f(_ref, _new, _scale, len(_scale), 0.0)
-_best = _mase(_y, _ref, _scale) - _mase(_y, _new, _scale)
-check("P5 D bounds the achievable gain", _best <= _D + 1e-12,
-      f"gain {_best:.6f} exceeded ceiling {_D:.6f}")
+# -- 4. displacement really does bound the gain, and scales with |m - 1| -------------
+_r = np.clip(_rng.lognormal(np.log(0.41), 0.6, _n), 0.01, None)
+_u = 0.5 * _r                                   # truth well below both predictions
+_D50 = float((np.abs(0.50 - 1.0) * _r).sum() / _N)
+_D75 = float((np.abs(0.75 - 1.0) * _r).sum() / _N)
+check("displacement ceiling is proportional to |m - 1|",
+      abs(_D75 / _D50 - 0.5) < 1e-12, f"ratio {_D75 / _D50:.6f}, expected 0.5")
+check("no truth arrangement beats the displacement ceiling",
+      S(1.0, _u, _r, _N) - S(0.5, _u, _r, _N) <= _D50 + 1e-12,
+      "gain exceeded the ceiling")
 
-# A balanced cohort returns a near-zero gain -- the Ramadan reading.
-_scale, _ref, _new, _y = _p5_fixture(0.5, seed=2)
-_G = _mase(_y, _ref, _scale) - _mase(_y, _new, _scale)
-_D, _f = displaced_mass_f(_ref, _new, _scale, len(_scale), _G)
-check("P5 balanced cohort gives f ~ 0.5 and |G| << D",
-      abs(_f - 0.5) < 0.02 and abs(_G) < 0.1 * _D,
-      f"f={_f:.4f} G={_G:+.6f} D={_D:.6f}")
-
-# The real reading, with D at the magnitude implied by the prediction file.
-_f_real = (1 + 0.00005 / 0.008) / 2
-check("P5 verdict branch fires on the measured Ramadan null",
-      abs(_f_real - 0.5) < 0.02,
-      f"f={_f_real:.4f} would not trigger the 'closed' branch")
+# -- 5. the conclusion v23 drew is ruled out by the magnitude it was drawn from -------
+# If predictions were already optimal (k ~ 1), halving forfeits the WHOLE ceiling.
+_u = 1.0 * _r
+check("already-optimal predictions would have LOST the full ceiling",
+      abs((S(0.5, _u, _r, _N) - S(1.0, _u, _r, _N)) - _D50) < 1e-12,
+      "halving an optimal prediction should cost exactly D, so a null rules it out")
 
 
 def body_from_notebook(name, path="cinema_v5.ipynb"):
