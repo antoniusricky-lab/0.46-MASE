@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 21
+NB_VERSION = 22
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
