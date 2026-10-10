@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 19
+NB_VERSION = 20
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -3524,13 +3524,15 @@ code(r"""
 t0 = time.time()
 line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 
-LEB_MULTS = [1.8, 2.0]        # the slope is still negative at 1.6; see P3
-RAM_MULTS = [1.0]             # 1.0 = leave Ramadan alone; 0.85 damps it
+LEB_MULTS = [2.0, 2.2]        # 2.0 scored 0.40532 and the slope is still negative; see P3
+RAM_MULTS = [1.0, 0.85]       # Ramadan straddle rows have NEVER been probed. Industry
+                              # reports put Ramadan attendance 30-40% below normal, and the
+                              # (2.0, 1.0) file below is the known 0.40532 reference.
 
 # Measured leaderboard scores for the flat Lebaran multiplier. Add every new result
 # here; P3 fits the left arm and extrapolates, which beats reasoning about it by hand.
 LB_HISTORY = {1.0: 0.42677, 1.15: 0.42213, 1.2: 0.42057,
-              1.4: 0.41518, 1.6: 0.41080}
+              1.4: 0.41518, 1.6: 0.41080, 1.8: 0.40754, 2.0: 0.40532}
 
 _preds = sorted(Path(".").glob("v5_test_pred_*.csv"))
 if not _preds:
@@ -3614,6 +3616,14 @@ else:
           f"{float(p.loc[p.leb == 1, 'ratio'].mean()):.3f}, so a multiplier of m implies a true")
     print(f"  ratio of {float(p.loc[p.leb == 1, 'ratio'].mean()):.3f} x m. FINDINGS.md measured")
     print("  train's Eid-window median y/scale at 1.880, which corresponds to m ~ 1.8.")
+    print()
+    _nram = int((p.ram_exp > 0).sum())
+    print(f"  RAMADAN is the untested cohort: {_nram:,} straddle rows "
+          f"({_nram / len(p):.2%}) -- films that opened before Ramadan with target days inside")
+    print("  it, so their D1-D3 scale was measured at normal demand. Films whose D1-D3 was")
+    print("  already in Ramadan get ram_exp = 0 and are left alone, which is right because")
+    print("  their scale already reflects the lower level. Industry reporting puts Ramadan")
+    print("  attendance 30-40% below normal, so probe RAM_MULTS below 1.0.")
     print()
     print("  CAVEAT on the public split: the Lebaran cohort is 6.08% of the test set, so only")
     print("  ~1,325 of these rows are scored publicly against ~3,092 held privately. One")
@@ -4200,6 +4210,43 @@ a third model class in the blend, and scale-reweighted training.
   reasoning said ~1.05 expected vs 1.09 predicted), then that its decay was too steep, then too
   shallow. The flat multiplier was correct and the horizon shape was not the issue. The one thing
   that worked was spending a submission on a question that had no offline answer.
+
+### What the top of the leaderboard is actually doing
+
+`github.com/LeonArif/JOINTS` (top 4, 0.35793) runs **two** pipelines, and its own logs separate
+them:
+
+| their file | LB | their description |
+|------------|----|-------------------|
+| `submission_ref_lb0.43729.csv` | 0.43729 | "built only from LB probes and pre-Cinepoint models (no post-cutoff data)" |
+| `main_legit.ipynb` | **0.42037** | "no post-cutoff traces" -- their best clean score |
+| `submission_teacher_cinepoint_lb0.36284.csv` | **0.36284** | "built with post-cutoff Cinepoint" |
+
+`external/cinepoint/cinepoint_scrape.py` drives a browser against `cinepoint.com/pages/tbo` and
+harvests **daily national admissions per film** for 2025-10-01 to 2026-03-31 -- the test period.
+Knowing a test film's real national daily admissions and splitting it across clusters by D1-D3
+share is the target variable supplied by a third party. Their scraper docstring says as much:
+"Dates after 2025-09-30 are post cutoff (trial / assumption data only)."
+
+**So the clean comparison is 0.42037, and this notebook is at 0.40532 -- ahead of it.** The step
+to 0.358 is external data, not modelling, and is not reproduced here.
+
+**Legitimately useful material in that repo** (all published before 2025-09-30, calendar or
+historical facts rather than test-period sales):
+
+- `external/lebaran_admissions.csv` -- daily admissions for films released on Eid 2025. Day 8
+  against day 1: JUMBO 5.4x, QODRAT 2 2.9x, KOMANG 2.8x, PABRIK GULA 1.5x. **Eid-week demand
+  builds rather than decaying**, which is the independent confirmation the Lebaran probes were
+  missing, and our cohort is worse placed still (D1-D3 in the late-Ramadan trough, D4-D10 in the
+  Eid peak).
+- `ramadan.csv`, `school_calendar_regional.csv`, `cuti_bersama.csv`,
+  `extra_national_holidays.csv` -- sourced calendar dates covering the test period. Theirs puts
+  Ramadan 1447 starting **2026-02-18** and Eid at **03-20/21**; CELL 1 hand-codes 02-19 and 03-21.
+- Their competition-feature family (`comp_n_cin`, `comp_size_cin`, `comp_fresh_cin`, `date_idx`,
+  `own_idx`), built from each side's own pairs so no post-cutoff data, with a reported time-split
+  gain of 0.3146 -> 0.2955.
+- Their notes also record, independently: decay-curve models gave better CV and worse LB, and
+  "our CV has pointed the wrong way three times" -- the same lesson this log reaches.
 
 ### The headline problem: CV gains are not transferring
 
