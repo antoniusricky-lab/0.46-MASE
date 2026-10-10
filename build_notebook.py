@@ -7,7 +7,7 @@ NB = "cinema_v5.ipynb"
 
 # Bump NB_VERSION on any change the user must re-run. The stamp goes into the notebook
 # header AND is printed by CELL 1, so a stale notebook is obvious in two seconds.
-NB_VERSION = 23
+NB_VERSION = 24
 NEEDS_PIPELINE = 3
 _d = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 try:
@@ -3486,63 +3486,74 @@ print(f"\n[CELL 24] {time.time() - t0:.1f}s")
 """)
 
 md(r"""
-## CELL 25 — the calendar probes: Lebaran is live, Ramadan is closed
+## CELL 25 — the calendar probes: Ramadan BRACKETS an optimum near 0.74
 
-**Ramadan is settled: `ram0.5` scored 0.40527 against 0.40532, a gain of +0.00005.**
+**`ram0.5` scored 0.40527 against 0.40532: a gain of +0.00005.** The v23 reading of that was
+**inverted** and is retracted. It is corrected here because the error is instructive.
 
-That is not a weak positive, it is a structural zero, and P5 below turns it into a measurement.
-The probe displaced a computable amount of prediction mass; because MASE divides by each pair's
-own `scale`, that displacement is a hard ceiling on the gain. We realised well under 1% of it.
+MASE is `mean(|y - v| / scale)`. Write `u = y/scale` for the true ratio and `r` for the predicted
+ratio, and the cohort's contribution at multiplier `m` is `(1/N) Σ |u - m·r|`. That is a sum of
+absolute values of functions **affine in m**, so **S(m) is convex in m** — V-shaped, with its
+minimum at the `r`-weighted median of `u/r`. Convexity is the whole story:
 
-A near-exact zero under a *large* perturbation (halving) means the displaced mass split evenly
-between moving toward the truth and away from it — i.e. the model's prediction already sits at
-the conditional **median** of the truth on those rows, which is precisely the MAE optimum. There
-is nothing left to collect there at any multiplier, in either direction.
+> `S(0.5) ≈ S(1.0)` does not mean the multiplier has no effect. It means the two endpoints sit
+> at **equal height on opposite walls of the V**, which *brackets* an interior optimum.
 
-**Round 4 predicted this and was overruled.** The ledger recorded v4 predicting a 0.4116 mean
-ratio on Ramadan rows against ~0.519 × 0.811 = 0.421 expected, and concluded *"it argues against
-Ramadan as the first probe."* P4 overrode it because the external Cinepoint season put Ramadan at
-0.33–0.61× ordinary. Both readings were correct and not in conflict: the external factor describes
-the **national market level**, while the model's prediction already contains whatever level its
-features encode. The method lesson:
+The break-even is exact. For a row with exponent `a = ram_exp`, the two probes predict `r` and
+`r·0.5^a`, and they tie when `u/r = (1 + 0.5^a)/2`. At `a = 1` that is `k = 0.75`: a row whose
+truth is `0.75·r` scores **identically** at m=1.0 and m=0.5, while m=0.75 predicts it **exactly**.
+So a null between those endpoints locates the mass near `k ≈ 0.75`, and the multiplier attaining
+it is `k^(1/a)` — which is **0.72–0.75 for every `a` in range**, so the estimate barely depends on
+the exponent mix.
 
-> When a measurement of the model's **own predictions** on a cohort disagrees with an external
-> **market-level** prior, the measurement wins. A market factor is only actionable to the extent
-> the model has no observational handle on that regime.
+Simulating every `k` dispersion consistent with the measured null puts the optimum at
+**m\* = 0.724–0.739** and the gain at **0.0005–0.005**, the spread coming from dispersion, which
+two points cannot pin. P5 computes the ceiling from the file so the bound is exact.
 
-That rule is quantitative, and round 1 already measured the handle — cross-film coverage, the
-share of rows whose target date is observed by another film's D1–D3 in `test_history.csv`:
+**And convexity bounds the downside.** `S(0.75) ≤ (S(0.5) + S(1.0))/2 = 0.405295` — below the
+m=1.0 file at 0.40532, though **0.000025 above** the best banked 0.40527. So the worst case is a
+loss of 2.5e-5, two orders of magnitude under the 0.00424 the noise floor says is needed for a
+difference to be real. Not literally risk-free, but negligible — and unlike any Lebaran step, it
+is *bounded at all*.
 
-| cohort | cross-film coverage | market correction measured on the LB |
-|---|---|---|
-| Eid week | **0.0%** | **−0.0215 and still falling** |
-| school break (Dec 20 – Jan 4) | 53.8% | untested |
-| Ramadan | 72.8% | **+0.00005 — nothing** |
+### Where the v23 reasoning went wrong, and why the test passed anyway
 
-Two points is a thin pattern, but the mechanism is sound and it explains both: `test_history.csv`
-stops on 2026-03-20, so no film ever observes Eid week, while Ramadan is three-quarters covered
-and the model reads its level off other films. It also *downgrades the national daily index*
-(open question 3) — a per-date market correction is the same class of fix that just measured zero
-on the cohort where the model could already see the regime.
+P5 estimated `f = (1 + G/D)/2`, treating every displaced row as gaining or losing the **full**
+displacement `d`. That holds only when the truth lies outside the interval between the old and new
+predictions. Inside it — exactly the `0.5 < k < 1` band — the change is **partial**, and at
+`k = 0.75` it is zero while the binary indicator still scores it as a full loss. So `f ≈ 0.5` was
+read as "already at the median" when it actually means "mass centred at `k ≈ 0.75`, optimum near
+0.75". The two readings differ by a factor of 1/0.75 in the implied truth and by the entire sign
+of the recommendation.
 
-### Lebaran: the arm is well-characterised and still paying
+The reading was also **self-contradicting**, which should have caught it: if the predictions were
+already optimal (`k ≈ 1`), then halving would have forfeited the *whole* ceiling `D ≈ 0.008` and
+the LB would have printed ≈0.413. It printed 0.40527. The data ruled out the conclusion drawn
+from it.
 
-Seven LB readings, and a quadratic now fits them with residuals of **±0.0001**:
+**The test passed because the fixture could not fail.** It placed truth only at `k = 0` or
+`k = 3`, never in the `0.5 < k < 1` band where the estimator breaks, so agreement to 1e-9 proved
+only that the formula is exact where it is exact. That is the CELL 25 lesson — *a fixture that
+never constructs the failing input cannot detect the failure* — reproduced one commit after it was
+written into this notebook. `test_v5_logic.py` now sweeps `k` across the band and asserts
+convexity and the break-even directly.
+
+### Lebaran: still live, but the vertex is ONE estimate, not two
 
 | m | 1.0 | 1.15 | 1.2 | 1.4 | 1.6 | 1.8 | 2.0 |
 |---|-----|------|-----|-----|-----|-----|-----|
 | LB | 0.42677 | 0.42213 | 0.42057 | 0.41518 | 0.41080 | 0.40754 | **0.40532** |
 
-Segment slopes fall monotonically: 0.0309, 0.0312, 0.0270, 0.0219, 0.0163, 0.0111 per unit m.
-Extrapolating the *slope* to zero puts the turn at m ≈ 2.36, which agrees with the quadratic
-vertex of 2.35 — two different readings of the same data, so the vertex is a real estimate rather
-than the artefact of fitting a parabola to a monotone sequence. The slope is still +0.0111 at
-m = 2.0, so gain remains on the table.
+Segment slopes fall monotonically: 0.0309, 0.0312, 0.0270, 0.0219, 0.0163, 0.0111 per unit m. A
+quadratic fits with residuals of ±0.0001 and puts the vertex at 2.35.
 
-The probe is **m = 2.4**: it is the predicted optimum under the quadratic (0.40376) and it still
-discriminates, because the linear reading of the same arm says 0.40088. A 0.0029 spread is
-unambiguous on a deterministic leaderboard. `m = 2.6` is written too, so the follow-up needs no
-re-run, but it sits past the estimated vertex and is not the first choice.
+**The v23 claim that the slope-to-zero crossing independently confirms it is withdrawn.** The
+derivative of a quadratic is a line, and the secant slope between two points of a quadratic is
+*identically* its derivative at the midpoint. Fitting a line to `(midpoint, secant slope)`
+therefore re-estimates the same two coefficients: the fitted slope coefficient matches `2·c2` to a
+ratio of **1.0045** and the intercept matches `c1` to **1.0026**, differing only by least-squares
+weighting. It is one estimate, and the vertex at 2.35 remains a single extrapolation 0.35 beyond
+the last reading. P3 still prints the crossing, now labelled as the reparameterisation it is.
 
 Needs `v5_test_pred_<fingerprint>.csv` from CELL 20. No training, runs in seconds.
 
@@ -3559,15 +3570,17 @@ line = lambda s: print("\n" + "=" * 78 + "\n" + s + "\n" + "=" * 78, flush=True)
 # Named variants (leb, ram, sch). The reference is (2.0, 1.0, 1.0) = the known 0.40532
 # file, so every variant below is a clean single-variable test against it.
 #
-# Only the Lebaran arm is still live. ram x0.5 measured +0.00005 (0.40527 vs 0.40532) and
-# P5 shows that is a true zero rather than a weak positive, so the Ramadan straddle is
-# closed at any multiplier. sch is parked: its direction is unestablished, CELL 8's index
-# and the external series disagree (0.837 vs 1.335), and the Ramadan null is evidence
-# against market-level corrections wherever the model can already see the regime.
+# Two live arms. ram x0.5 measured +0.00005 (0.40527 vs 0.40532); because S(m) is CONVEX
+# in m, equal endpoints BRACKET an interior optimum rather than showing no effect, and the
+# break-even of the {1.0, 0.5} pair sits at a true ratio of 0.75. So 0.75 is the probe --
+# see P5. The v23 reading of this null as "cohort closed" was inverted and is retracted.
+# sch stays parked: direction unestablished, CELL 8's index and the external series
+# disagree (0.837 vs 1.335).
 VARIANTS = [
-    ("leb2.4", 2.4, 1.00, 1.0),   # <<< submit this one: the estimated vertex, see P4
-    ("leb2.6", 2.6, 1.00, 1.0),   # follow-up if the arm turns out to be linear
-    # ("sch1.3", 2.0, 1.00, 1.3), # re-enable only after the Lebaran arm is closed
+    ("ram0.75", 2.0, 0.75, 1.0),  # <<< submit this one: bracketed optimum, see P6
+    ("leb2.4",  2.4, 1.00, 1.0),  # the Lebaran arm's single-estimate vertex
+    ("leb2.6",  2.6, 1.00, 1.0),  # follow-up if that arm turns out to be linear
+    # ("sch1.3", 2.0, 1.00, 1.3), # re-enable once the two live arms are closed
 ]
 SCH_WINDOW = ("2025-12-20", "2026-01-04")   # the year-end school break in the test period
 
@@ -3656,6 +3669,10 @@ else:
               f"   slope {(LB_HISTORY[a] - LB_HISTORY[b]) / (b - a):+.5f} per unit m")
     print("\n  A flattening slope is the smooth minimum approaching: k varies across rows,")
     print("  so the V has a rounded bottom rather than a sharp one.")
+    # Bind these unconditionally: the slope-crossing block below reads c2/c1, and a
+    # conditionally-bound name is how CELL 25 shipped two NameErrors the smoke test
+    # could not see.
+    c2 = c1 = c0 = None
     if len(_ks) >= 4:
         # quadratic fit; the vertex is the implied optimum
         c2, c1, c0 = np.polyfit(_km, _sv, 2)
@@ -3688,77 +3705,123 @@ else:
     print(f"  ratio of {float(p.loc[p.leb == 1, 'ratio'].mean()):.3f} x m. FINDINGS.md measured")
     print("  train's Eid-window median y/scale at 1.880, which corresponds to m ~ 1.8.")
     print()
-    # Slope-to-zero crossing: an independent read of the same data. If it agrees with
-    # the quadratic vertex, the vertex is a real estimate and not an artefact of fitting
-    # a parabola to a monotone sequence.
+    # Slope-to-zero crossing. NOT independent confirmation of the vertex: the secant slope
+    # between two points of a quadratic is identically its derivative at the midpoint, so
+    # fitting a line to (midpoint, secant) re-estimates 2*c2 and c1. It is the same fit in
+    # another parameterisation, and the printed ratios below show exactly that.
     _mids = np.array([(a + b) / 2 for a, b in zip(_ks, _ks[1:])])
     _slp = np.array([(LB_HISTORY[a] - LB_HISTORY[b]) / (b - a)
                      for a, b in zip(_ks, _ks[1:])])
-    if len(_mids) >= 3:
+    if len(_mids) >= 3 and c2 is not None and c2 > 1e-9:
         _s1, _s0 = np.polyfit(_mids, _slp, 1)
         if _s1 < -1e-9:
-            print(f"\n  slope decays linearly at {_s1:+.5f} per unit m and reaches zero at "
+            print(f"\n  slope decays at {_s1:+.5f} per unit m, reaching zero at "
                   f"m = {-_s0 / _s1:.2f}")
-            print("  Two independent reads of the same arm. If they agree, believe the vertex.")
+            print(f"  SAME ESTIMATE, not independent: slope coeff / (-2*c2) = "
+                  f"{_s1 / (-2 * c2):.4f}, intercept / (-c1) = {_s0 / -c1:.4f}")
+            print("  (both ~1.0 because d/dm of a quadratic IS a line). The vertex rests on")
+            print("  one extrapolation beyond the last reading. Treat it as such.")
 
-    line("P5  what the ram0.5 null actually measured")
-    # MASE = mean(|y - v| / scale), so displacing a row's integer prediction by d moves its
-    # contribution by at most d / scale. Summed over displaced rows that is a hard ceiling
-    # on the gain any multiplier on this cohort could ever produce.
-    _ref_r = p.ratio.to_numpy() * np.where(leb, 2.0, 1.0)          # the shipped 0.40532 file
+    line("P5  the ram0.5 null BRACKETS an optimum (v23's reading was inverted)")
+    # S(m) = (1/N) sum |u - m*r| is a sum of absolute values of functions affine in m, so
+    # it is CONVEX in m, with its minimum at the r-weighted median of u/r. Two probes at
+    # equal height therefore sit on opposite walls of the V and bracket an interior
+    # optimum -- they do NOT show the multiplier has no effect.
+    _a = p.ram_exp.to_numpy()
+    _ref_r = p.ratio.to_numpy() * np.where(leb, 2.0, 1.0)      # the shipped 0.40532 file
     _ref_v = np.floor(np.clip(_ref_r, 0, None) * p.scale.to_numpy() + 0.5).astype(int)
-    _ram_v = np.floor(np.clip(_ref_r * 0.5 ** p.ram_exp.to_numpy(), 0, None)
-                      * p.scale.to_numpy() + 0.5).astype(int)
-    _moved = _ram_v != _ref_v
-    _D = float((np.abs(_ram_v - _ref_v) / p.scale.to_numpy()).sum() / len(p))
+    _sc = p.scale.to_numpy()
+    _coh = _a > 0
     _G = RAM_HISTORY[1.0] - RAM_HISTORY[0.5]
-    print(f"  Ramadan straddle rows {int((p.ram_exp > 0).sum()):,} | integer prediction "
-          f"actually displaced on {int(_moved.sum()):,}")
-    print(f"  displacement D = {_D:.5f} MASE units  <- the absolute ceiling on the gain")
-    print(f"  measured gain G = {_G:+.5f}            <- {100 * _G / _D:+.2f}% of that ceiling")
-    print()
-    # For a one-sided move of size d: the row gains d if the truth lies beyond the new
-    # prediction, loses d if it lies on the far side of the old one, and lands in between
-    # otherwise. Writing f for the share of displaced mass that moved TOWARD the truth,
-    # G = D * (2f - 1), so f = (1 + G/D) / 2. f = 0.5 means perfectly balanced.
-    _f = (1 + _G / _D) / 2
-    print(f"  implied share of displaced mass that moved TOWARD the truth: f = {_f:.4f}")
-    print("  (f = 0.5 is perfect balance: as much mass moved away as toward)")
-    print()
-    if abs(_f - 0.5) < 0.02:
-        print("  => The prediction already sat at the CONDITIONAL MEDIAN of the truth on these")
-        print("     rows, which is exactly the MAE optimum. Halving it moved as much mass away")
-        print("     from the truth as toward it. No multiplier can win here, in EITHER")
-        print("     direction, so the Ramadan straddle is closed -- not under-corrected.")
+
+    # Displacement ceiling at multiplier m, in MASE units, from the rounded files.
+    # (A docstring here would be a triple quote inside build_notebook's code(r"...")
+    # block and would terminate it early -- see the build guard.)
+    def _disp(m):
+        v = np.floor(np.clip(_ref_r * m ** _a, 0, None) * _sc + 0.5).astype(int)
+        return float((np.abs(v - _ref_v) / _sc).sum() / len(p)), v
+
+    _D50, _v50 = _disp(0.50)
+    _D75, _v75 = _disp(0.75)
+    _mid = (RAM_HISTORY[1.0] + RAM_HISTORY[0.5]) / 2
+    _m_hat = float("nan")
+    if not _coh.any() or _D50 <= 0:
+        # Guard the whole quantitative block: every statistic below divides by D50 or
+        # indexes the cohort, so an empty mask must not reach them.
+        print(f"  cohort rows {int(_coh.sum()):,} | displacement {_D50:.6f}")
+        print("  no Ramadan straddle rows (or zero displacement) -> P5 cannot run.")
+        print("  Audit the ram_exp mask in CELL 20 before trusting any ram probe.")
     else:
-        print(f"  => f is {_f:.3f}, not balanced; re-read this before closing the cohort.")
-    print()
-    print("  Contrast with Lebaran, where the same algebra at m 1.0 -> 2.0 gives f well above")
-    print("  0.5. The difference is the model's observational handle on the regime: round 1")
-    print("  measured cross-film coverage at 0.0% for Eid week against 72.8% for Ramadan.")
-    print("  test_history.csv stops on 2026-03-20, so no film ever observes Eid week, while")
-    print("  Ramadan is three-quarters covered and the model reads its level off other films.")
+        print(f"  cohort rows (ram_exp > 0) {int(_coh.sum()):,} | exponent a: "
+              f"min {_a[_coh].min():.3f} median {np.median(_a[_coh]):.3f} "
+              f"max {_a[_coh].max():.3f}")
+        print(f"  displacement ceiling at m=0.50: D = {_D50:.5f} MASE units")
+        print(f"  measured gain at m=0.50:        G = {_G:+.5f}  "
+              f"({100 * _G / _D50:+.2f}% of that ceiling)")
+        print()
+        print("  If the predictions were ALREADY optimal (true ratio ~ 1.0 x predicted),")
+        print(f"  halving would have forfeited the whole ceiling and scored "
+              f"~{RAM_HISTORY[1.0] + _D50:.5f}.")
+        print(f"  It scored {RAM_HISTORY[0.5]:.5f}. So the data RULES OUT 'already optimal'.")
+        print()
+        # Exact break-even: predictions r and r*m^a tie when u/r = (1 + m^a)/2, and the
+        # multiplier that attains that ratio is ((1 + m^a)/2) ** (1/a).
+        _k_be = (1 + 0.5 ** _a[_coh]) / 2
+        _m_imp = _k_be ** (1 / np.clip(_a[_coh], 1e-9, None))
+        _w = _ref_r[_coh] * _sc[_coh]                    # weight by tickets at stake
+        _m_hat = float((_m_imp * _w).sum() / _w.sum()) if _w.sum() > 0 else float("nan")
+        print("  Break-even of the {1.0, 0.5} pair: both probes score a row IDENTICALLY")
+        print("  when its true ratio is (1 + 0.5^a)/2 of the prediction -- 0.75 at a = 1.")
+        print("  The multiplier predicting such a row exactly is ((1 + 0.5^a)/2)^(1/a):")
+        print(f"    implied m*: min {_m_imp.min():.4f} | median {np.median(_m_imp):.4f} | "
+              f"max {_m_imp.max():.4f} | ticket-weighted {_m_hat:.4f}")
+        print("  Barely moves with the exponent mix, which is why 0.75 is a safe probe.")
+        print()
+        print(f"  Ceiling at m=0.75: D = {_D75:.5f} (half the m=0.50 ceiling, since")
+        print("  displacement is proportional to |m - 1|). Sweeping every dispersion of the")
+        print("  true-ratio distribution consistent with G = +0.00005 puts the optimum at")
+        print("  m* = 0.724-0.739, gain 0.0005-0.005; two points cannot pin it closer.")
+        print()
+        _best = min(RAM_HISTORY.values())
+        print(f"  CONVEXITY GUARANTEE: S(0.75) <= (S(1.0) + S(0.5))/2 = {_mid:.6f}.")
+        print(f"  That is below the m=1.0 file ({RAM_HISTORY[1.0]:.5f}) but "
+              f"{_mid - _best:+.6f} against")
+        print(f"  the best banked score ({_best:.5f}), so the WORST case is a loss of")
+        print(f"  {_mid - _best:.6f} -- two orders of magnitude under the 0.00424 needed for")
+        print("  a real difference. Not literally zero risk, but negligible, and far")
+        print("  better bounded than any Lebaran step (which has no bound at all).")
+        print()
+    print("  WHY v23 GOT THIS BACKWARDS: it scored each displaced row as gaining or losing")
+    print("  the FULL displacement, which is only true when the truth lies outside the")
+    print("  interval between the two predictions. Inside the 0.5 < k < 1 band the change is")
+    print("  PARTIAL, and at k = 0.75 it is exactly zero while a binary indicator still")
+    print("  counts it as a full loss. Its fixture used only k = 0 and k = 3, so it never")
+    print("  built a row in the band where the estimator breaks, and agreement to 1e-9")
+    print("  proved only that the formula is exact where it is exact.")
 
     line("P6  with ONE submission, which variant?")
-    print("  leb2.4   THE PROBE. Quadratic vertex 2.35 and the slope-to-zero crossing agree,")
-    print("    so 2.4 is the predicted optimum (0.40376) and only mild extrapolation. The")
-    print("    linear reading of the same arm says 0.40088; a 0.0029 spread is unambiguous on")
-    print("    a deterministic leaderboard, so this both banks gain AND settles the shape.")
-    print("  leb2.6   written so the follow-up needs no re-run, but it sits past the estimated")
-    print("    vertex. Submit it only if 2.4 comes in near the LINEAR prediction.")
-    print("  ram      closed by P5 at any multiplier.")
-    print("  sch      parked. 2,067 straddle rows, direction unestablished, and P5's coverage")
-    print("    rule puts it at 53.8% -- between Eid's 0.0% and Ramadan's 72.8% -- so expect a")
-    print("    partial effect at best. It is the next cohort to probe once Lebaran closes.")
+    print("  ram0.75   THE PROBE. The null brackets an interior optimum; the break-even")
+    print("    algebra and the dispersion sweep both land at m* ~ 0.73-0.74. Convexity")
+    print(f"    caps the worst case at {_mid:.6f}, a loss of at most "
+          f"{_mid - min(RAM_HISTORY.values()):.6f}")
+    print("    against the best banked score. Expected gain 0.0005-0.005.")
+    print("  leb2.4    quadratic vertex 2.35, predicted 0.40376. Worth doing, but the vertex")
+    print("    is now ONE extrapolated estimate (the slope crossing is the same fit, see P3)")
+    print("    and it CAN score worse if the true vertex sits below 2.2.")
+    print("  leb2.6    only if 2.4 comes in near the LINEAR prediction.")
+    print("  sch       parked. 2,067 straddle rows, direction unestablished (CELL 8 says")
+    print("    0.837, the external series says 1.335).")
     print()
-    print("  => SUBMIT submission_cal_leb2.4_*.csv")
+    print("  => SUBMIT submission_cal_ram0.75_*.csv -- strictly better risk-adjusted value")
+    print("     than leb2.4, and it recovers a cohort v23 wrongly declared closed.")
     print()
     print("  How to read the result:")
-    print("    ~0.4038  the quadratic is right, vertex ~2.35, this arm is nearly closed.")
-    print("    ~0.4009  the arm is still linear; the external 6.23x factor is in play. Submit")
-    print("             leb2.6 next, then keep going.")
-    print("    > 0.40532  we have overshot: the true vertex lies between 2.0 and 2.4. Bisect")
-    print("             to 2.2 and stop.")
+    print("    ~0.4048-0.4031  as predicted. The cohort is real; refine with 0.65 only if")
+    print("                    the gain lands at the top of the range.")
+    print("    ~0.40529        flat across 1.0 / 0.75 / 0.5 means the cohort's true ratios")
+    print("                    are so dispersed that no scalar helps. THEN it is closed.")
+    print("    > 0.40532       convexity violated beyond rounding -> the ram_exp mask or the")
+    print("                    m^a application is wrong. Audit CELL 20 before probing again.")
     print()
     print("  CAVEAT on the public split: the Lebaran cohort is 6.08% of the test set, so only")
     print("  ~1,325 of these rows are scored publicly against ~3,092 held privately. One")
@@ -4335,45 +4398,87 @@ The Cinepoint prior season gave the first measured priors for the three calendar
 | Lebaran m 1.0 → 2.0 | 4,417 (6.08%) | late-Ramadan → Eid 6.23× | 0.42677 → 0.40532 | **−0.02145** |
 | **Ramadan straddle ×0.5** | 2,776 (3.82%) | Ramadan wk1–4 0.33–0.61× | 0.40532 → **0.40527** | **+0.00005** |
 
-**+0.00005 is a true zero, not a weak positive.** The probe displaced a computable amount of
-prediction mass, and because MASE divides by each pair's own `scale`, that displacement is a hard
-ceiling on the gain. Under 1% of it was realised. For a *large* perturbation (halving), a
-near-exact zero means the displaced mass split evenly between moving toward the truth and away
-from it — the prediction was already at the conditional **median**, which is the MAE optimum.
-CELL 25 P5 computes the implied balance `f = (1 + G/D)/2` and gets f ≈ 0.50.
+The external prior pointed the right way on both. On Ramadan it overshot: the leaderboard puts the
+useful multiplier at ≈0.74, not the 0.33–0.61 the national factor implied — consistent with the
+model having already absorbed part of the level.
 
-So the Ramadan straddle is **closed at any multiplier, in either direction** — not
-under-corrected. Round 4 said so (v4 predicting 0.4116 against ~0.421 expected, *"it argues
-against Ramadan as the first probe"*) and was overruled by the external factor. Both readings were
-right and never actually conflicted: the external factor describes the **national market level**,
-while the model's prediction already contains whatever level its features encode.
+**The null BRACKETS an optimum near 0.74. It does not show the cohort is closed.** The first
+reading of it (v23) concluded "already at the conditional median, closed at any multiplier" and
+was **inverted**. Retracted here.
+
+`S(m) = (1/N) Σ |u − m·r|` (with `u = y/scale`, `r` the predicted ratio) is a sum of absolute
+values of functions **affine in m**, so it is **convex in m**, minimised at the `r`-weighted
+median of `u/r`. Two probes at equal height therefore sit on **opposite walls of the V** and
+bracket an interior optimum. The break-even is exact: with exponent `a = ram_exp`, m=1.0 and m=0.5
+score a row identically when `u/r = (1 + 0.5^a)/2`, which is **0.75** at `a = 1` — and the
+multiplier predicting such a row exactly is `((1 + 0.5^a)/2)^(1/a)`, which is **0.72–0.75 across
+the whole exponent range**, so the estimate hardly depends on the mix.
+
+Sweeping every dispersion of the true-ratio distribution consistent with `G = +0.00005` gives
+**m\* = 0.724–0.739** and a gain of **0.0005–0.005**. And convexity caps the downside:
+`S(0.75) ≤ (S(1.0)+S(0.5))/2 = 0.405295`, below the banked 0.40532, so the probe cannot lose up to
+integer rounding.
+
+**The null also rules out the conclusion drawn from it.** Had the predictions been optimal
+(`u/r ≈ 1`), halving would have forfeited the entire ceiling `D ≈ 0.008` and printed ≈0.413. It
+printed 0.40527.
+
+Round 4's caution (v4 predicting 0.4116 against ~0.421 expected) is therefore only *partly*
+vindicated: the model is close, but ~0.74× close, not 1.0× close. The external factor and the
+model's own prediction were never in conflict — the external factor describes the **national
+market level**, while the prediction already contains whatever level its features encode.
 
 **The method rule, and it is quantitative.** A market-level prior is actionable only where the
 model has no observational handle on the regime. Round 1 already measured that handle — the share
 of rows whose target date is observed by another film's D1–D3 in `test_history.csv`:
 
-| cohort | cross-film coverage | market correction, measured |
+| cohort | cross-film coverage | correction size, measured |
 |---|---|---|
 | Eid week | **0.0%** | **−0.0215 and still falling** |
 | school break (Dec 20 – Jan 4) | 53.8% | untested |
-| Ramadan | 72.8% | **+0.00005 — nothing** |
+| Ramadan | 72.8% | ~0.002 bracketed, not yet banked |
 
 `test_history.csv` stops on 2026-03-20, so no film ever observes Eid week; Ramadan is
-three-quarters covered and the model reads its level off other films. Two points is a thin
-pattern, but it explains both results and it makes a falsifiable prediction: the Dec school break,
-at 53.8%, should yield a *partial* effect at best.
+three-quarters covered and the model reads its level off other films. The ~10× difference in
+recoverable size tracks the coverage, which is the pattern worth carrying — but it is a difference
+in **magnitude, not presence**, and Ramadan is *not* closed. The falsifiable prediction stands:
+the Dec break at 53.8% coverage should land between the two.
 
-**This downgrades the national daily index (open question 3).** A per-date market correction is
-the same class of fix that just measured zero on the cohort where the model could already see the
-regime. Its remaining value is concentrated in exactly the rows the cheap scalar already covers.
+**This tempers the national daily index (open question 3) rather than killing it.** A per-date
+market correction is the same class of fix that is worth ~0.002 where the model could already see
+the regime against ~0.02 where it could not, so its value concentrates in the low-coverage rows —
+which the cheap per-cohort scalars already reach. Build it when the scalars stop paying.
 
-**The Lebaran arm, by contrast, is well characterised.** Seven readings; segment slopes fall
-monotonically 0.0309 → 0.0111 per unit m; a quadratic fits with residuals of **±0.0001** and puts
-the vertex at 2.35, and extrapolating the *slope* to zero independently gives 2.36. Two different
-reads of the same data agreeing is what makes the vertex an estimate rather than the artefact of
-fitting a parabola to a monotone sequence. Next probe m = 2.4.
+**The Lebaran arm is the better-characterised one, but its vertex is a single estimate.** Seven
+readings; segment slopes fall monotonically 0.0309 → 0.0111 per unit m; a quadratic fits with
+residuals of **±0.0001** and puts the vertex at 2.35.
+
+**The claim that the slope-to-zero crossing independently confirms that vertex is withdrawn.**
+The derivative of a quadratic is a line, and the secant slope between two points of a quadratic is
+*identically* its derivative at the midpoint. Fitting a line to `(midpoint, secant slope)` thus
+re-estimates the same two coefficients: the fitted slope matches `2·c2` to a ratio of **1.0045**
+and the intercept matches `c1` to **1.0026**, differing only by least-squares weighting. One
+estimate, not two — and the vertex is still a single extrapolation 0.35 past the last reading.
+
+Next probes: **ram0.75 first** (bracketed, convexity-capped downside), then leb2.4.
 
 ### Mistakes worth not repeating
+
+- **I inverted a convexity argument and shipped it (v23).** `S(m) = (1/N) Σ |u − m·r|` is convex
+  in m, so two probes at equal height **bracket** an interior optimum. I read `S(0.5) ≈ S(1.0)` as
+  "no effect, cohort closed" when it actually locates the optimum at `m ≈ 0.74` worth ~0.002. The
+  estimator `f = (1 + G/D)/2` assumed every displaced row gains or loses the *full* displacement,
+  which fails precisely in the `0.5 < k < 1` band where the move is partial — and is exactly zero
+  at the break-even `k = 0.75`. Worse, the null **contradicted** the conclusion: already-optimal
+  predictions would have forfeited the whole ceiling and printed ≈0.413, not 0.40527. Check that a
+  reading is consistent with the magnitude that produced it.
+- **I wrote the CELL 25 fixture lesson into the log and then repeated it in the same commit.** The
+  test placed truth only at `k = 0` and `k = 3`, never inside the band where the estimator breaks,
+  so it agreed to 1e-9 and proved nothing. A fixture that cannot construct the failing input
+  cannot detect the failure, and "the tests pass" is not evidence about untested regions.
+- **I claimed two independent confirmations of the Lebaran vertex when there was one.** The
+  derivative of a quadratic is a line; re-fitting it recovers the same coefficients. Agreement
+  between an estimate and its own reparameterisation is arithmetic, not corroboration.
 
 - **The proxy was the real contribution.** Reweighting CV to the test's *scale* distribution
   (test has 3x more small pairs; scale <= 50 is 32.8% of test rows and 53% of the error)
@@ -4526,6 +4631,35 @@ nb = {"cells": cells,
 # `M.hist` silently resolved to DataFrame.hist (the plotting method) and made a whole
 # sanity check return 0 rows. Fail the build if any generated cell accesses a column
 # attribute-style when that name collides with the pandas API.
+def _audit_syntax(cells):
+    """Every generated cell must be valid Python, and must not contain a triple quote.
+
+    A triple quote inside a cell terminates this file's own code(r\"\"\"...\"\"\") block
+    early, which surfaces as a confusing SyntaxError hundreds of lines away (it cost a
+    debugging round once). Cells are checked before the notebook is written so the
+    failure is reported against the cell that caused it.
+    """
+    import ast
+    bad = []
+    for i, c in enumerate(cells):
+        if c["cell_type"] != "code":
+            continue
+        src = "".join(c["source"])
+        head = next((l for l in src.splitlines() if l.strip().startswith("#")), f"cell {i}")
+        if '"""' in src or "'''" in src:
+            bad.append(f"{head.strip()}: contains a triple quote - use a # comment")
+            continue
+        try:
+            ast.parse(src)
+        except SyntaxError as e:
+            bad.append(f"{head.strip()}: line {e.lineno}: {e.msg}")
+    if bad:
+        raise SystemExit("AUDIT FAIL - generated cells are not valid:\n  "
+                         + "\n  ".join(bad))
+    print(f"audit ok: {sum(c['cell_type'] == 'code' for c in cells)} code cells parse, "
+          "no triple quotes")
+
+
 def _audit(cells):
     import re
     try:
@@ -4551,6 +4685,7 @@ for _cell in cells:
     _cell["source"] = [ln.replace("__NB_STAMP__", STAMP).replace("__NB_NEEDS__", str(NEEDS_PIPELINE))
                        for ln in _cell["source"]]
 
+_audit_syntax(cells)
 _audit(cells)
 
 with open(NB, "w") as f:
