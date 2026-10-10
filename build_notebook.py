@@ -3560,6 +3560,10 @@ else:
         print(f"  using {_src.name}")
     p = pd.read_csv(_src)
     _tag = _src.stem.replace("v5_test_pred_", "")
+    # Define the Lebaran mask from the file, NOT from a leftover global. CELL 26 also binds
+    # a name `leb`; relying on that made this cell depend on run order and NameError on a
+    # fresh kernel, and a stale array would be silently misaligned with `p`.
+    leb = p.leb.to_numpy() == 1
     print(f"  source {_src.name} | rows {len(p):,}")
     print(f"  Lebaran-week rows {int(p.leb.sum()):,} ({p.leb.mean():.2%}) | "
           f"Ramadan-transition rows {int((p.ram_exp > 0).sum()):,}")
@@ -3584,8 +3588,12 @@ else:
     _d1 = (_te.groupby("movie_title").date_show.min() - pd.Timedelta(days=3))
     _te["d1"] = _te.movie_title.map(_d1)
     _j = p.merge(_te[["id", "date_show", "d1"]], on="id", how="left")
+    # sch_exp is applied to `p` positionally, so the join must be strictly 1:1 and in order.
+    assert len(_j) == len(p), f"id join changed row count {len(p)} -> {len(_j)} (duplicate ids?)"
+    assert (_j.id.to_numpy() == p.id.to_numpy()).all(), "id join reordered rows"
     assert _j.date_show.notna().all(), "id join against test.csv failed"
-    _in_sch = lambda d: d.between(*SCH_WINDOW).to_numpy().astype(float)
+    _SCH = tuple(pd.Timestamp(x) for x in SCH_WINDOW)
+    _in_sch = lambda d: d.between(*_SCH).to_numpy().astype(float)
     _sch_hist = sum(_in_sch(_j.d1 + pd.Timedelta(days=k)) for k in range(3)) / 3
     sch_exp = _in_sch(_j.date_show) * (1 - _sch_hist)   # 1 = target in break, D1-D3 outside it
     print(f"  school-break target rows {int((_in_sch(_j.date_show) > 0).sum()):,} | "
@@ -3631,7 +3639,10 @@ else:
             print("  differences of ~0.0005 between points.")
         else:
             print("\n  quadratic fit is concave (no interior minimum yet) -> keep raising m")
-        for m in LEB_MULTS:
+        # Extrapolate for the Lebaran levels this run actually writes, plus the next
+        # few steps up, so the table stays useful after the optimum is bracketed.
+        _probe_ms = sorted({lm for _, lm, _, _ in VARIANTS} | {2.2, 2.4, 2.6})
+        for m in _probe_ms:
             if m > _ks[-1]:
                 lin = _sv[-1] - ((LB_HISTORY[_ks[-2]] - _sv[-1])
                                  / (_ks[-1] - _ks[-2])) * (m - _ks[-1])
@@ -3651,8 +3662,8 @@ else:
           f"({_nram / len(p):.2%}) -- films that opened before Ramadan with target days inside")
     print("  it, so their D1-D3 scale was measured at normal demand. Films whose D1-D3 was")
     print("  already in Ramadan get ram_exp = 0 and are left alone, which is right because")
-    print("  their scale already reflects the lower level. Industry reporting puts Ramadan")
-    print("  attendance 30-40% below normal, so probe RAM_MULTS below 1.0.")
+    print("  their scale already reflects the lower level. The external Cinepoint season puts")
+    print("  Ramadan weeks at 0.33-0.61x ordinary, which is where the 0.50 variant comes from.")
     print()
     line("P4  with ONE submission, which variant?")
     print("  Expected gains, using the Lebaran calibration (6.08% of rows, m 1.0 -> 2.0 gained")
